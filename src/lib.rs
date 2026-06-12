@@ -1,11 +1,19 @@
+pub mod device;
 mod error;
 pub mod protocol;
+pub mod targeting;
 pub mod transport;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+
+use crate::device::{
+    discover_supported_devices, select_single_device, DeviceDiscovery, SystemDeviceDiscovery,
+};
+use crate::targeting::resolve_target;
+use crate::transport::{SerialTransportFactory, SystemTransportFactory};
 
 pub use error::{Error, Result};
 
@@ -132,7 +140,11 @@ where
 }
 
 pub fn run(cli: Cli) -> Result<()> {
-    Err(Error::unimplemented(cli.command.name()))
+    let discovery = SystemDeviceDiscovery;
+    let mut transport_factory = SystemTransportFactory;
+    let output = execute_cli(cli, &discovery, &mut transport_factory)?;
+    print!("{output}");
+    Ok(())
 }
 
 pub fn main() -> ExitCode {
@@ -151,25 +163,6 @@ pub fn main() -> ExitCode {
             u8::try_from(exit_code)
                 .map(ExitCode::from)
                 .unwrap_or(ExitCode::FAILURE)
-        }
-    }
-}
-
-impl TopLevelCommand {
-    fn name(&self) -> &'static str {
-        match self {
-            TopLevelCommand::Device(args) => args.command.name(),
-            TopLevelCommand::Runtime(args) => args.command.name(),
-            TopLevelCommand::Screen(args) => args.command.name(),
-        }
-    }
-}
-
-impl DeviceCommand {
-    fn name(&self) -> &'static str {
-        match self {
-            DeviceCommand::List => "device list",
-            DeviceCommand::Info { .. } => "device info",
         }
     }
 }
@@ -198,9 +191,80 @@ impl ScreenCommand {
     }
 }
 
+fn execute_cli<D, F>(cli: Cli, discovery: &D, transport_factory: &mut F) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    match cli.command {
+        TopLevelCommand::Device(args) => match args.command {
+            DeviceCommand::List => render_device_list(discovery),
+            DeviceCommand::Info { target } => {
+                render_device_info(discovery, transport_factory, &target)
+            }
+        },
+        TopLevelCommand::Runtime(args) => Err(Error::unimplemented(args.command.name())),
+        TopLevelCommand::Screen(args) => Err(Error::unimplemented(args.command.name())),
+    }
+}
+
+fn render_device_list(discovery: &impl DeviceDiscovery) -> Result<String> {
+    let devices = discover_supported_devices(discovery)?;
+
+    if devices.is_empty() {
+        return Ok("No supported VSN1/Grid USB serial devices found.\n".to_string());
+    }
+
+    let mut output = String::from("Discovered supported VSN1/Grid USB serial devices:\n");
+
+    for device in devices {
+        output.push_str("- ");
+        output.push_str(&device.to_string());
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
+fn render_device_info<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let _transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+
+    Ok(format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\n",
+        protocol::GRID_BAUD_RATE
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::{DeviceError, DiscoveredDevice};
+    use crate::transport::{FakeTransportFactory, OpenCall};
+
+    struct StaticDiscovery {
+        devices: Vec<DiscoveredDevice>,
+        error: Option<DeviceError>,
+    }
+
+    impl DeviceDiscovery for StaticDiscovery {
+        fn discover(&self) -> std::result::Result<Vec<DiscoveredDevice>, DeviceError> {
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(self.devices.clone()),
+            }
+        }
+    }
 
     #[test]
     fn command_surface_includes_top_level_groups() {
@@ -221,6 +285,25 @@ mod tests {
             Cli {
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::List,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_device_info_with_explicit_target() {
+        let cli = try_parse_from(["vsn1-cli", "device", "info", "--dx", "1", "--dy", "2"]).unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::Info {
+                        target: TargetArgs {
+                            dx: Some(1),
+                            dy: Some(2),
+                        },
+                    },
                 }),
             }
         );
@@ -318,14 +401,91 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_stub_error_for_unimplemented_command() {
-        let error = run(Cli {
-            command: TopLevelCommand::Device(DeviceArgs {
-                command: DeviceCommand::List,
-            }),
-        })
+    fn device_info_defaults_to_broadcast_and_opens_the_selected_transport() {
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut transport_factory = FakeTransportFactory::default();
+
+        let output = execute_cli(
+            Cli {
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::Info {
+                        target: TargetArgs::default(),
+                    },
+                }),
+            },
+            &discovery,
+            &mut transport_factory,
+        )
+        .unwrap();
+
+        assert!(output.contains("Module target: broadcast"));
+        assert_eq!(
+            transport_factory.open_calls(),
+            &[OpenCall {
+                port_name: "/dev/ttyACM0".to_string(),
+                baud_rate: protocol::GRID_BAUD_RATE,
+            }]
+        );
+    }
+
+    #[test]
+    fn device_info_fails_when_multiple_supported_devices_are_visible() {
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0"), test_device("/dev/ttyACM1")],
+            error: None,
+        };
+        let mut transport_factory = FakeTransportFactory::default();
+
+        let error = execute_cli(
+            Cli {
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::Info {
+                        target: TargetArgs::default(),
+                    },
+                }),
+            },
+            &discovery,
+            &mut transport_factory,
+        )
         .unwrap_err();
 
-        assert_eq!(error.to_string(), "device list is not implemented yet");
+        assert_eq!(
+            error.to_string(),
+            "multiple supported VSN1/Grid USB serial devices found ([\"/dev/ttyACM0\", \"/dev/ttyACM1\"]); `device info` needs exactly one visible device for now"
+        );
+    }
+
+    #[test]
+    fn run_returns_stub_error_for_unimplemented_command() {
+        let error = execute_cli(
+            Cli {
+                command: TopLevelCommand::Runtime(RuntimeArgs {
+                    command: RuntimeCommand::Verify,
+                }),
+            },
+            &StaticDiscovery {
+                devices: Vec::new(),
+                error: None,
+            },
+            &mut FakeTransportFactory::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "runtime verify is not implemented yet");
+    }
+
+    fn test_device(port_name: &str) -> DiscoveredDevice {
+        DiscoveredDevice {
+            port_name: port_name.to_string(),
+            vendor_id: 0x03eb,
+            product_id: 0xecac,
+            serial_number: Some("ABC123".to_string()),
+            manufacturer: Some("Intech".to_string()),
+            product: Some("VSN1".to_string()),
+            known_label: "Grid / VSN1",
+        }
     }
 }

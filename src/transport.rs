@@ -1,12 +1,19 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::io;
+use std::io::Write;
+use std::time::Duration;
+
+use serialport::SerialPort;
 
 use crate::protocol::{self, ConfigWrite, ImmediateWrite};
 use crate::Result;
 
+const SERIAL_TIMEOUT: Duration = Duration::from_millis(250);
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TransportOperation {
+    Open,
     Immediate,
     Config,
 }
@@ -22,6 +29,28 @@ pub trait SerialTransport {
     fn write_config(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError>;
 }
 
+pub trait SerialTransportFactory {
+    type Transport: SerialTransport;
+
+    fn open(
+        &mut self,
+        port_name: &str,
+        baud_rate: u32,
+    ) -> std::result::Result<Self::Transport, TransportError>;
+}
+
+pub struct SystemTransportFactory;
+
+pub struct SystemSerialTransport {
+    port: Box<dyn SerialPort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCall {
+    pub port_name: String,
+    pub baud_rate: u32,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FakeTransport {
     immediate_writes: Vec<Vec<u8>>,
@@ -30,7 +59,20 @@ pub struct FakeTransport {
     next_config_error: Option<TransportError>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FakeTransportFactory {
+    open_calls: Vec<OpenCall>,
+    next_open_error: Option<TransportError>,
+}
+
 impl TransportError {
+    pub fn open(message: impl Into<String>) -> Self {
+        Self {
+            operation: TransportOperation::Open,
+            message: message.into(),
+        }
+    }
+
     pub fn immediate(message: impl Into<String>) -> Self {
         Self {
             operation: TransportOperation::Immediate,
@@ -60,15 +102,60 @@ impl TransportError {
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let operation = match self.operation {
+            TransportOperation::Open => "transport open",
             TransportOperation::Immediate => "immediate",
             TransportOperation::Config => "config",
         };
 
-        write!(f, "{operation} transport write failed: {}", self.message)
+        match self.operation {
+            TransportOperation::Open => write!(f, "{operation} failed: {}", self.message),
+            _ => write!(f, "{operation} transport write failed: {}", self.message),
+        }
     }
 }
 
 impl StdError for TransportError {}
+
+impl SerialTransportFactory for SystemTransportFactory {
+    type Transport = SystemSerialTransport;
+
+    fn open(
+        &mut self,
+        port_name: &str,
+        baud_rate: u32,
+    ) -> std::result::Result<Self::Transport, TransportError> {
+        let port = serialport::new(port_name, baud_rate)
+            .timeout(SERIAL_TIMEOUT)
+            .open()
+            .map_err(|error| TransportError::open(error.to_string()))?;
+
+        Ok(SystemSerialTransport { port })
+    }
+}
+
+impl SerialTransport for SystemSerialTransport {
+    fn write_immediate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+        self.port
+            .write_all(packet)
+            .map_err(|error| TransportError::from_io(TransportOperation::Immediate, error))?;
+        self.port
+            .flush()
+            .map_err(|error| TransportError::from_io(TransportOperation::Immediate, error))?;
+
+        Ok(())
+    }
+
+    fn write_config(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+        self.port
+            .write_all(packet)
+            .map_err(|error| TransportError::from_io(TransportOperation::Config, error))?;
+        self.port
+            .flush()
+            .map_err(|error| TransportError::from_io(TransportOperation::Config, error))?;
+
+        Ok(())
+    }
+}
 
 impl FakeTransport {
     pub fn fail_next_immediate(&mut self, error: TransportError) {
@@ -85,6 +172,37 @@ impl FakeTransport {
 
     pub fn config_writes(&self) -> &[Vec<u8>] {
         &self.config_writes
+    }
+}
+
+impl FakeTransportFactory {
+    pub fn fail_next_open(&mut self, error: TransportError) {
+        self.next_open_error = Some(error);
+    }
+
+    pub fn open_calls(&self) -> &[OpenCall] {
+        &self.open_calls
+    }
+}
+
+impl SerialTransportFactory for FakeTransportFactory {
+    type Transport = FakeTransport;
+
+    fn open(
+        &mut self,
+        port_name: &str,
+        baud_rate: u32,
+    ) -> std::result::Result<Self::Transport, TransportError> {
+        if let Some(error) = self.next_open_error.take() {
+            return Err(error);
+        }
+
+        self.open_calls.push(OpenCall {
+            port_name: port_name.to_string(),
+            baud_rate,
+        });
+
+        Ok(FakeTransport::default())
     }
 }
 
@@ -202,6 +320,21 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "config transport write failed: permission denied"
+        );
+    }
+
+    #[test]
+    fn fake_transport_factory_records_open_calls() {
+        let mut factory = FakeTransportFactory::default();
+
+        let _transport = factory.open("/dev/ttyACM0", 2_000_000).unwrap();
+
+        assert_eq!(
+            factory.open_calls(),
+            &[OpenCall {
+                port_name: "/dev/ttyACM0".to_string(),
+                baud_rate: 2_000_000,
+            }]
         );
     }
 }

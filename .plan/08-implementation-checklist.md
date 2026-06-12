@@ -14,11 +14,11 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 - Overall status: `in progress`
 - Last completed step: `step 2`
-- In-progress step: `none`
+- In-progress step: `step 3 - add device discovery and targeting`
 - Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass)
-- Last hardware validation: `not required for step 2`
-- Open blockers: `none`
-- Next session start point: `step 3 - add device discovery and targeting`
+- Last hardware validation: `not run yet for step 3; hardware gate still pending`
+- Open blockers: `real-device validation still required for discovered topology and explicit targeting`
+- Next session start point: `step 3 - run hardware validation and close out the remaining hardware gate`
 
 ## Rules for every step
 
@@ -53,13 +53,13 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 3: Add device discovery and targeting
 
-- [ ] Add `device.rs` and `targeting.rs`.
-- [ ] Implement device enumeration and target selection rules.
-- [ ] Support broadcast-first defaults plus explicit `--dx` and `--dy` overrides.
-- [ ] Implement `device list` and `device info` using the transport abstraction.
-- [ ] Add unit tests for targeting resolution, ambiguous-target failures, and CLI parsing.
+- [x] Add `device.rs` and `targeting.rs`.
+- [x] Implement device enumeration and target selection rules.
+- [x] Support broadcast-first defaults plus explicit `--dx` and `--dy` overrides.
+- [x] Implement `device list` and `device info` using the transport abstraction.
+- [x] Add unit tests for targeting resolution, ambiguous-target failures, and CLI parsing.
 - [ ] Hardware gate: confirm discovered topology and explicit targeting on a real device.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 4: Ship the first end-to-end screen path with `screen raw`
 
@@ -146,7 +146,7 @@ Update this section as work lands.
 
 - Step 1: `completed on 2026-06-12`
 - Step 2: `completed on 2026-06-12`
-- Step 3: `not started`
+- Step 3: `in progress - software complete, hardware validation pending`
 - Step 4: `not started`
 - Step 5: `not started`
 - Step 6: `not started`
