@@ -1,4 +1,6 @@
 mod error;
+pub mod protocol;
+pub mod transport;
 
 use std::ffi::OsString;
 use std::process::ExitCode;

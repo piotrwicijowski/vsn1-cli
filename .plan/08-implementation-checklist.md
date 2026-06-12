@@ -13,12 +13,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 ## Session handoff state
 
 - Overall status: `in progress`
-- Last completed step: `step 1`
+- Last completed step: `step 2`
 - In-progress step: `none`
 - Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass)
-- Last hardware validation: `not required for step 1`
+- Last hardware validation: `not required for step 2`
 - Open blockers: `none`
-- Next session start point: `step 2 - build protocol, transport, and test seams`
+- Next session start point: `step 3 - add device discovery and targeting`
 
 ## Rules for every step
 
@@ -44,12 +44,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 2: Build protocol, transport, and test seams
 
-- [ ] Add `protocol.rs` for Grid packet framing and command encoding.
-- [ ] Add `transport.rs` with a serial transport trait plus a fake transport for tests.
-- [ ] Add deterministic Lua framing for `<?lua ... ?>` payloads.
-- [ ] Keep provisioning writes and immediate writes separated in the API.
-- [ ] Add unit tests for packet encoding, framing, and transport error mapping.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Add `protocol.rs` for Grid packet framing and command encoding.
+- [x] Add `transport.rs` with a serial transport trait plus a fake transport for tests.
+- [x] Add deterministic Lua framing for `<?lua ... ?>` payloads.
+- [x] Keep provisioning writes and immediate writes separated in the API.
+- [x] Add unit tests for packet encoding, framing, and transport error mapping.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 3: Add device discovery and targeting
 
@@ -145,7 +145,7 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 Update this section as work lands.
 
 - Step 1: `completed on 2026-06-12`
-- Step 2: `not started`
+- Step 2: `completed on 2026-06-12`
 - Step 3: `not started`
 - Step 4: `not started`
 - Step 5: `not started`
