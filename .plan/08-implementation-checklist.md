@@ -14,11 +14,11 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 - Overall status: `in progress`
 - Last completed step: `step 2`
-- In-progress step: `step 3 - add device discovery and targeting`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass)
-- Last hardware validation: `not run yet for step 3; hardware gate still pending`
-- Open blockers: `real-device validation still required for discovered topology and explicit targeting`
-- Next session start point: `step 3 - run hardware validation and close out the remaining hardware gate`
+- In-progress step: `step 4 - ship the first end-to-end screen path with screen raw`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-12 after wiring screen raw through the immediate path)
+- Last hardware validation: `step 3 attempted on 2026-06-12: cargo run -- device list now correctly reports no supported devices in this container after filtering out enumerated-but-missing /dev paths; step 4 hardware validation not run yet because this container still lacks direct access to the real /dev/ttyACM* node`
+- Open blockers: `step 3 real-device validation still required for discovered topology and explicit targeting; step 4 real-device validation still required to confirm screen raw changes the screen on hardware`
+- Next session start point: `step 4 - run hardware validation for screen raw on the host with direct serial-device access, then close the remaining hardware gate and revisit step 3 host validation if needed`
 
 ## Rules for every step
 
@@ -63,12 +63,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 4: Ship the first end-to-end screen path with `screen raw`
 
-- [ ] Add `raw.rs` and wire `screen raw` through the library.
-- [ ] Send raw framed Lua through the immediate path.
-- [ ] Reuse the same diagnostics and targeting behavior as other screen commands.
-- [ ] Add unit tests for raw command parsing, payload framing, and error reporting.
+- [x] Add `raw.rs` and wire `screen raw` through the library.
+- [x] Send raw framed Lua through the immediate path.
+- [x] Reuse the same diagnostics and targeting behavior as other screen commands.
+- [x] Add unit tests for raw command parsing, payload framing, and error reporting.
 - [ ] Hardware gate: confirm `screen raw` changes the screen on a real device.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 5: Define the runtime bundle contract
 
@@ -146,8 +146,8 @@ Update this section as work lands.
 
 - Step 1: `completed on 2026-06-12`
 - Step 2: `completed on 2026-06-12`
-- Step 3: `in progress - software complete, hardware validation pending`
-- Step 4: `not started`
+- Step 3: `in progress - software complete, discovery hardened against missing device nodes, hardware validation still pending on a host runtime with direct serial access`
+- Step 4: `in progress - software complete, hardware validation pending on a host runtime with direct serial access`
 - Step 5: `not started`
 - Step 6: `not started`
 - Step 7: `not started`

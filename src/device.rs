@@ -1,5 +1,6 @@
 use std::error::Error as StdError;
 use std::fmt;
+use std::path::Path;
 
 use serialport::{SerialPortInfo, SerialPortType};
 
@@ -118,6 +119,7 @@ impl DeviceDiscovery for SystemDeviceDiscovery {
         let mut devices = ports
             .into_iter()
             .filter_map(map_matching_device)
+            .filter(|device| device_path_exists(&device.port_name))
             .collect::<Vec<_>>();
         devices.sort_by(|left, right| left.port_name.cmp(&right.port_name));
 
@@ -166,6 +168,10 @@ fn map_matching_device(port: SerialPortInfo) -> Option<DiscoveredDevice> {
     })
 }
 
+fn device_path_exists(port_name: &str) -> bool {
+    Path::new(port_name).exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,6 +210,12 @@ mod tests {
                 port_names: vec!["/dev/ttyACM0".to_string(), "/dev/ttyACM1".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn system_discovery_only_keeps_device_paths_that_exist() {
+        assert!(device_path_exists("/dev/null"));
+        assert!(!device_path_exists("/definitely/not/a/vsn1/device"));
     }
 
     fn test_device(port_name: &str) -> DiscoveredDevice {

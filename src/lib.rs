@@ -1,6 +1,7 @@
 pub mod device;
 mod error;
 pub mod protocol;
+pub mod raw;
 pub mod targeting;
 pub mod transport;
 
@@ -12,6 +13,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use crate::device::{
     discover_supported_devices, select_single_device, DeviceDiscovery, SystemDeviceDiscovery,
 };
+use crate::raw::send_screen_raw;
 use crate::targeting::resolve_target;
 use crate::transport::{SerialTransportFactory, SystemTransportFactory};
 
@@ -204,7 +206,12 @@ where
             }
         },
         TopLevelCommand::Runtime(args) => Err(Error::unimplemented(args.command.name())),
-        TopLevelCommand::Screen(args) => Err(Error::unimplemented(args.command.name())),
+        TopLevelCommand::Screen(args) => match args.command {
+            ScreenCommand::Raw { lua, target } => {
+                execute_screen_raw(discovery, transport_factory, &target, &lua)
+            }
+            command => Err(Error::unimplemented(command.name())),
+        },
     }
 }
 
@@ -246,11 +253,86 @@ where
     ))
 }
 
+fn execute_screen_raw<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+    lua: &str,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let mut transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+
+    send_screen_raw(&mut transport, target.grid_target(), lua)?;
+
+    Ok(format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\nSent raw screen update over the immediate path.\n",
+        protocol::GRID_BAUD_RATE
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use crate::device::{DeviceError, DiscoveredDevice};
-    use crate::transport::{FakeTransportFactory, OpenCall};
+    use crate::transport::{
+        FakeTransportFactory, OpenCall, SerialTransport, SerialTransportFactory, TransportError,
+    };
+
+    #[derive(Debug, Default)]
+    struct RecordingTransport {
+        immediate_writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl SerialTransport for RecordingTransport {
+        fn write_immediate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+            self.immediate_writes.borrow_mut().push(packet.to_vec());
+            Ok(())
+        }
+
+        fn write_config(&mut self, _packet: &[u8]) -> std::result::Result<(), TransportError> {
+            panic!("screen raw should not use config writes")
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingTransportFactory {
+        open_calls: Vec<OpenCall>,
+        immediate_writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl RecordingTransportFactory {
+        fn immediate_writes(&self) -> Vec<Vec<u8>> {
+            self.immediate_writes.borrow().clone()
+        }
+    }
+
+    impl SerialTransportFactory for RecordingTransportFactory {
+        type Transport = RecordingTransport;
+
+        fn open(
+            &mut self,
+            port_name: &str,
+            baud_rate: u32,
+        ) -> std::result::Result<Self::Transport, TransportError> {
+            self.open_calls.push(OpenCall {
+                port_name: port_name.to_string(),
+                baud_rate,
+            });
+
+            Ok(RecordingTransport {
+                immediate_writes: Rc::clone(&self.immediate_writes),
+            })
+        }
+    }
 
     struct StaticDiscovery {
         devices: Vec<DiscoveredDevice>,
@@ -475,6 +557,99 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "runtime verify is not implemented yet");
+    }
+
+    #[test]
+    fn screen_raw_uses_targeting_and_sends_one_immediate_packet() {
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut transport_factory = RecordingTransportFactory::default();
+
+        let output = execute_cli(
+            Cli {
+                command: TopLevelCommand::Screen(ScreenArgs {
+                    command: ScreenCommand::Raw {
+                        lua: "return 1".to_string(),
+                        target: TargetArgs {
+                            dx: Some(1),
+                            dy: Some(2),
+                        },
+                    },
+                }),
+            },
+            &discovery,
+            &mut transport_factory,
+        )
+        .unwrap();
+
+        assert!(output.contains("Module target: dx=1 dy=2"));
+        assert_eq!(
+            transport_factory.open_calls,
+            vec![OpenCall {
+                port_name: "/dev/ttyACM0".to_string(),
+                baud_rate: protocol::GRID_BAUD_RATE,
+            }]
+        );
+
+        let writes = transport_factory.immediate_writes();
+        let packet = &writes[0];
+        assert_eq!(&packet[14..18], b"8081");
+        assert_eq!(&packet[32..packet.len() - 5], b"<?lua return 1 ?>");
+    }
+
+    #[test]
+    fn screen_raw_surfaces_targeting_errors() {
+        let error = execute_cli(
+            Cli {
+                command: TopLevelCommand::Screen(ScreenArgs {
+                    command: ScreenCommand::Raw {
+                        lua: "return 1".to_string(),
+                        target: TargetArgs {
+                            dx: Some(1),
+                            dy: None,
+                        },
+                    },
+                }),
+            },
+            &StaticDiscovery {
+                devices: vec![test_device("/dev/ttyACM0")],
+                error: None,
+            },
+            &mut FakeTransportFactory::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "both --dx and --dy must be provided together"
+        );
+    }
+
+    #[test]
+    fn screen_raw_surfaces_protocol_errors() {
+        let error = execute_cli(
+            Cli {
+                command: TopLevelCommand::Screen(ScreenArgs {
+                    command: ScreenCommand::Raw {
+                        lua: "snowman = '☃'".to_string(),
+                        target: TargetArgs::default(),
+                    },
+                }),
+            },
+            &StaticDiscovery {
+                devices: vec![test_device("/dev/ttyACM0")],
+                error: None,
+            },
+            &mut FakeTransportFactory::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "the current Grid packet encoder supports ASCII Lua only"
+        );
     }
 
     fn test_device(port_name: &str) -> DiscoveredDevice {
