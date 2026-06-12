@@ -12,13 +12,13 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ## Session handoff state
 
-- Overall status: `not started`
-- Last completed step: `none`
-- In-progress step: `step 1`
-- Last verification run: `none`
-- Last hardware validation: `none`
+- Overall status: `in progress`
+- Last completed step: `step 1`
+- In-progress step: `none`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass)
+- Last hardware validation: `not required for step 1`
 - Open blockers: `none`
-- Next session start point: `create crate skeleton and command shell`
+- Next session start point: `step 2 - build protocol, transport, and test seams`
 
 ## Rules for every step
 
@@ -35,12 +35,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 1: Bootstrap the crate and CLI shell
 
-- [ ] Create `Cargo.toml`, `src/lib.rs`, and `src/main.rs`.
-- [ ] Add shared error handling and a thin CLI entrypoint.
-- [ ] Add top-level command groups: `device`, `runtime`, `screen`.
-- [ ] Stub subcommands so parsing is stable even before behavior is implemented.
-- [ ] Add unit tests for CLI parsing and library entrypoints.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Create `Cargo.toml`, `src/lib.rs`, and `src/main.rs`.
+- [x] Add shared error handling and a thin CLI entrypoint.
+- [x] Add top-level command groups: `device`, `runtime`, `screen`.
+- [x] Stub subcommands so parsing is stable even before behavior is implemented.
+- [x] Add unit tests for CLI parsing and library entrypoints.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 2: Build protocol, transport, and test seams
 
@@ -144,7 +144,7 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 Update this section as work lands.
 
-- Step 1: `not started`
+- Step 1: `completed on 2026-06-12`
 - Step 2: `not started`
 - Step 3: `not started`
 - Step 4: `not started`
