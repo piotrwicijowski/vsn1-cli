@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
 
-pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-17-screen-first.5";
+pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-17-screen-first.8";
 
 const BUNDLED_RUNTIME_ROOT: &str = "assets/runtime";
 const MANIFEST_FILE_NAME: &str = "manifest.toml";

@@ -13,12 +13,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 ## Session handoff state
 
 - Overall status: `in progress`
-- Last completed step: `step 8`
-- In-progress step: `step 9`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after confirming from hardware behavior that helper calls now execute cleanly on dx=0 dy=0 but still show no visible output, then restoring the explicit LCD brightness init done by the reference runtime via glsb(255) in bundled runtime 2026-06-17-screen-first.5 and refreshing hashes)`
-- Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; later hardware testing via Grid Editor confirmed the stored draw slot runs on dx=0 dy=0, helper calls execute without Lua errors, and adding glsb(255) to the owned lcd-init runtime restores visible output`
+- Last completed step: `step 9`
+- In-progress step: `step 10`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after fixing the temporary-layer regression introduced in bundled runtime 2026-06-17-screen-first.6, then simplifying the slow-layer visual in bundled runtime 2026-06-17-screen-first.8 to remove the white panel/black bar artifact while staying under the Grid CONFIG payload limit)`
+- Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; subsequent hardware validation confirmed all step 9 behaviors pass visually on dx=0 dy=0: persistent rendering, screen clear, slow/fast activation, slow 5s timeout, fast 1s timeout, timer restart on re-activation, fast-to-slow fallback, fast-to-persistent fallback, and non-preemption of lower-layer updates while a higher-priority layer is active`
 - Open blockers: `none`
-- Next session start point: `continue step 9 hardware validation from the now-visible runtime on bundled version 2026-06-17-screen-first.5 by testing screen set, screen clear, screen activate, timer restart, fallback, and non-preemption behavior on dx=0 dy=0`
+- Next session start point: `begin step 10 runtime lifecycle work: implement runtime upgrade, repair, and remove while preserving owned-slot safety boundaries`
 
 ## Rules for every step
 
@@ -116,9 +116,9 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 - [x] Implement `screen clear <layer>` with explicit layer selection only.
 - [x] Implement `screen activate slow|fast`.
 - [x] Support combined `screen set ... --activate slow|fast`.
-- [ ] Compile high-level screen mutations into runtime-helper Lua calls.
+- [x] Compile high-level screen mutations into runtime-helper Lua calls.
 - [x] Add unit tests for command parsing, mixed-field validation, runtime gating, and Lua compilation.
-- [ ] Hardware gate: confirm layered visibility, timeout restart, fallback, and non-preemption behavior.
+- [x] Hardware gate: confirm layered visibility, timeout restart, fallback, and non-preemption behavior.
 - [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 10: Complete runtime lifecycle commands
@@ -152,7 +152,7 @@ Update this section as work lands.
 - Step 6: `completed on 2026-06-17 - software path added runtime.rs inspection, config-fetch verification, and CLI wiring; hardware validation on /dev/ttyACM0 at dx=0 dy=0 confirmed both drift detection before install and exact-match verification after bundled runtime install`
 - Step 7: `completed on 2026-06-17 - implemented runtime install with manifest-ordered owned-slot writes, owned-slot-only scope, post-install exact-match verification, CLI wiring, and step 7 unit tests; fixed the bundled lcd-init asset to fit the real Grid CONFIG payload limit, added bundle-size validation, corrected exact-match verification to compare against the framed stored CONFIG representation returned by fetches, validated runtime install/verify/status on /dev/ttyACM0 at dx=0 dy=0, and later fixed missing PAGEACTIVE + PAGESTORE persistence so install can survive reconnects`
 - Step 8: `completed on 2026-06-17 - added screen.rs bundled field-registry loading, typed layer/value metadata conversion from the manifest inventory, strict FIELD=VALUE parsing and validation, per-layer clear planning with runtime-default clear values, and step 8 unit tests covering lookup, parsing, value errors, and invalid bundled field specs`
-- Step 9: `in progress on 2026-06-17 - implemented screen set/clear/activate CLI wiring, exact runtime gating before curated sends, replaced the placeholder bundled lcd-draw asset with a minimal real renderer, compared the curated IMMEDIATE path against the working POC and found that packet sending still matches while the script body differed materially, rewrote the bundled runtime plus host compiler around compact stored helper calls, then used fresh Grid Editor hardware feedback to confirm draw-slot invocation on dx=0 dy=0, fixed the missing palette global c in bundled runtime 2026-06-17-screen-first.4, and finally confirmed the remaining visibility issue was missing brightness init: adding glsb(255) to the owned lcd-init runtime in bundled version 2026-06-17-screen-first.5 restored visible output; software tests remain green and layer/timer behavior validation is still pending`
+- Step 9: `completed on 2026-06-17 - implemented screen set/clear/activate CLI wiring, exact runtime gating before curated sends, replaced the placeholder bundled lcd-draw asset with a minimal real renderer, compared the curated IMMEDIATE path against the working POC and found that packet sending still matches while the script body differed materially, rewrote the bundled runtime plus host compiler around compact stored helper calls, then used fresh Grid Editor hardware feedback to confirm draw-slot invocation on dx=0 dy=0, fixed the missing palette global c in bundled runtime 2026-06-17-screen-first.4, restored visible output by adding glsb(255) to the owned lcd-init runtime in bundled version 2026-06-17-screen-first.5, addressed garbled slow-layer rendering by switching owned temporary-layer drawing to literal RGB colors in bundled version 2026-06-17-screen-first.6, fixed the temporary-layer activation regression introduced there in bundled version 2026-06-17-screen-first.7, simplified the slow-layer renderer in bundled version 2026-06-17-screen-first.8 to remove the remaining white-panel/black-bar artifact while staying under the Grid CONFIG payload limit, and completed hardware validation for layered visibility, timeout restart, fallback, and non-preemption behavior on dx=0 dy=0`
 - Step 10: `not started`
 - Step 11: `not started`
 
