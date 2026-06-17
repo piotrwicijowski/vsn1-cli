@@ -13,12 +13,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 ## Session handoff state
 
 - Overall status: `in progress`
-- Last completed step: `step 7`
-- In-progress step: `step 8 - curated screen field registry`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after aligning runtime install/verify with the real stored CONFIG representation returned by fetches, keeping bundled hashes on framed stored content, and preserving the bundle-size guard)`
+- Last completed step: `step 8`
+- In-progress step: `none`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after adding screen.rs bundled field-registry loading, typed assignment parsing, per-layer clear planning, and step 8 unit tests)`
 - Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; follow-up cargo run -- runtime verify --dx 0 --dy 0 and cargo run -- runtime status --dx 0 --dy 0 both also reported exact-match compatible on dx=0 dy=0`
-- Open blockers: `none for steps 6-7; next work is step 8 field registry implementation`
-- Next session start point: `implement step 8 by adding the curated screen field registry in screen.rs with field lookup, layer/value metadata, validation, and unit tests`
+- Open blockers: `none`
+- Next session start point: `implement step 9 by wiring screen set/clear/activate through the runtime-gated screen registry and compiling curated mutations into runtime-helper Lua`
 
 ## Rules for every step
 
@@ -102,12 +102,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 8: Add the curated screen field registry
 
-- [ ] Add `screen.rs` field registry keyed by public names like `persistent.title`.
-- [ ] Model layer, value kind, runtime key, and clear behavior per field.
-- [ ] Reject unknown field names and invalid value types.
-- [ ] Support different curated field sets per layer.
-- [ ] Add unit tests for field lookup, parsing, value validation, and clear planning.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Add `screen.rs` field registry keyed by public names like `persistent.title`.
+- [x] Model layer, value kind, runtime key, and clear behavior per field.
+- [x] Reject unknown field names and invalid value types.
+- [x] Support different curated field sets per layer.
+- [x] Add unit tests for field lookup, parsing, value validation, and clear planning.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 9: Implement `screen set`, `screen clear`, and `screen activate`
 
@@ -151,7 +151,7 @@ Update this section as work lands.
 - Step 5: `completed on 2026-06-12 - added the first bundled runtime contract with hashed LCD init/draw assets, manifest loading, normalized hash verification, and an initial curated dotted field inventory derived from the validated POC slot ownership and update_param(...) payload shape`
 - Step 6: `completed on 2026-06-17 - software path added runtime.rs inspection, config-fetch verification, and CLI wiring; hardware validation on /dev/ttyACM0 at dx=0 dy=0 confirmed both drift detection before install and exact-match verification after bundled runtime install`
 - Step 7: `completed on 2026-06-17 - implemented runtime install with manifest-ordered owned-slot writes, owned-slot-only scope, post-install exact-match verification, CLI wiring, and step 7 unit tests; fixed the bundled lcd-init asset to fit the real Grid CONFIG payload limit, added bundle-size validation, corrected exact-match verification to compare against the framed stored CONFIG representation returned by fetches, and validated runtime install/verify/status on /dev/ttyACM0 at dx=0 dy=0`
-- Step 8: `not started`
+- Step 8: `completed on 2026-06-17 - added screen.rs bundled field-registry loading, typed layer/value metadata conversion from the manifest inventory, strict FIELD=VALUE parsing and validation, per-layer clear planning with runtime-default clear values, and step 8 unit tests covering lookup, parsing, value errors, and invalid bundled field specs`
 - Step 9: `not started`
 - Step 10: `not started`
 - Step 11: `not started`

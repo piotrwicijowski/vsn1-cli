@@ -5,6 +5,7 @@ use crate::device::DeviceError;
 use crate::protocol::ProtocolError;
 use crate::runtime::RuntimeError;
 use crate::runtime_bundle::RuntimeBundleError;
+use crate::screen::ScreenError;
 use crate::targeting::TargetingError;
 use crate::transport::TransportError;
 
@@ -17,6 +18,7 @@ pub enum Error {
     Protocol(ProtocolError),
     Runtime(RuntimeError),
     RuntimeBundle(RuntimeBundleError),
+    Screen(ScreenError),
     Targeting(TargetingError),
     Transport(TransportError),
 }
@@ -35,6 +37,7 @@ impl fmt::Display for Error {
             Self::Protocol(error) => error.fmt(f),
             Self::Runtime(error) => error.fmt(f),
             Self::RuntimeBundle(error) => error.fmt(f),
+            Self::Screen(error) => error.fmt(f),
             Self::Targeting(error) => error.fmt(f),
             Self::Transport(error) => error.fmt(f),
         }
@@ -49,6 +52,7 @@ impl StdError for Error {
             Self::Protocol(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::RuntimeBundle(error) => Some(error),
+            Self::Screen(error) => Some(error),
             Self::Targeting(error) => Some(error),
             Self::Transport(error) => Some(error),
         }
@@ -82,6 +86,12 @@ impl From<RuntimeError> for Error {
 impl From<RuntimeBundleError> for Error {
     fn from(value: RuntimeBundleError) -> Self {
         Self::RuntimeBundle(value)
+    }
+}
+
+impl From<ScreenError> for Error {
+    fn from(value: ScreenError) -> Self {
+        Self::Screen(value)
     }
 }
 
