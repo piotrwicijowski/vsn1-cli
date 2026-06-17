@@ -4,6 +4,7 @@ use std::fmt;
 pub const GRID_BAUD_RATE: u32 = 2_000_000;
 pub const GRID_BROADCAST_COORDINATE: i16 = -127;
 pub const GRID_MAX_LUA_BYTES: usize = 909;
+pub const GRID_LUA_CALLBACK_PREFIX: &str = "--[[@cb]]";
 
 const GRID_CONST_SOH: u8 = 0x01;
 const GRID_CONST_STX: u8 = 0x02;
@@ -152,14 +153,26 @@ impl StdError for ProtocolError {}
 pub fn frame_lua(lua: &str) -> String {
     let trimmed = lua.trim();
 
+    let normalize_body = |body: &str| {
+        let body = body.trim();
+
+        if body.starts_with(GRID_LUA_CALLBACK_PREFIX) {
+            body.to_string()
+        } else if body.is_empty() {
+            GRID_LUA_CALLBACK_PREFIX.to_string()
+        } else {
+            format!("{GRID_LUA_CALLBACK_PREFIX} {body}")
+        }
+    };
+
     if let Some(inner) = trimmed
         .strip_prefix("<?lua")
         .and_then(|inner| inner.strip_suffix("?>"))
     {
-        return format!("<?lua {} ?>", inner.trim());
+        return format!("<?lua {} ?>", normalize_body(inner));
     }
 
-    format!("<?lua {trimmed} ?>")
+    format!("<?lua {} ?>", normalize_body(trimmed))
 }
 
 pub fn encode_immediate_packet(write: &ImmediateWrite<'_>) -> Result<Vec<u8>> {
@@ -324,12 +337,23 @@ mod tests {
 
     #[test]
     fn frames_unframed_lua_deterministically() {
-        assert_eq!(frame_lua("  return 1\n"), "<?lua return 1 ?>");
+        assert_eq!(frame_lua("  return 1\n"), "<?lua --[[@cb]] return 1 ?>");
     }
 
     #[test]
     fn normalizes_existing_lua_frame() {
-        assert_eq!(frame_lua(" <?lua   return 1   ?> "), "<?lua return 1 ?>");
+        assert_eq!(
+            frame_lua(" <?lua   return 1   ?> "),
+            "<?lua --[[@cb]] return 1 ?>"
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_callback_prefix() {
+        assert_eq!(
+            frame_lua(" <?lua --[[@cb]] return 1 ?> "),
+            "<?lua --[[@cb]] return 1 ?>"
+        );
     }
 
     #[test]
@@ -342,10 +366,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(&packet[0..2], &[GRID_CONST_SOH, GRID_CONST_BRC]);
-        assert_eq!(&packet[2..6], b"002f");
+        assert_eq!(&packet[2..6], b"0039");
         assert_eq!(&packet[23..28], b"\x02085e");
-        assert_eq!(&packet[28..32], b"000d");
-        assert_eq!(immediate_payload(&packet), b"<?lua test ?>");
+        assert_eq!(&packet[28..32], b"0017");
+        assert_eq!(immediate_payload(&packet), b"<?lua --[[@cb]] test ?>");
         assert!(packet_has_valid_checksum(&packet));
         assert_eq!(packet.last(), Some(&GRID_CONST_LF));
     }
@@ -360,13 +384,13 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(&packet[2..6], b"003f");
+        assert_eq!(&packet[2..6], b"0049");
         assert_eq!(&packet[14..18], b"7f80");
         assert_eq!(&packet[23..28], b"\x02060e");
         assert_eq!(&packet[28..34], b"010501");
         assert_eq!(&packet[34..40], b"ff0d08");
-        assert_eq!(&packet[40..44], b"0011");
-        assert_eq!(config_payload(&packet), b"<?lua return 1 ?>");
+        assert_eq!(&packet[40..44], b"001b");
+        assert_eq!(config_payload(&packet), b"<?lua --[[@cb]] return 1 ?>");
         assert!(packet_has_valid_checksum(&packet));
     }
 

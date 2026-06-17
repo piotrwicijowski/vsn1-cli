@@ -28,8 +28,9 @@ The production architecture should be built around these confirmed findings:
 1. The viable live-update path is runtime-driven.
    - Stored config installs the LCD runtime and draw handler.
    - Live screen updates should primarily call runtime helpers such as `update_param(...)`.
+   - The stored LCD init must also establish renderer-required globals and visible-state init such as palette globals like `c[...]` and explicit brightness init via `glsb(255)`; helper calls can succeed without visible output if that init surface is incomplete.
 
-2. Live `IMMEDIATE` payloads must be framed as `<?lua ... ?>`.
+2. Live `IMMEDIATE` payloads must be framed as `<?lua --[[@cb]] ... ?>`.
 
 3. Host send rate is not the same as visible screen-update rate.
    - The reliable visible budget is currently about `5-10` updates/sec depending on payload shape.

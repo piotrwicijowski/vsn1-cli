@@ -1152,7 +1152,7 @@ runtime_marker = "fixture:first"
         .unwrap_err();
 
         assert!(error.to_string().contains(
-            "post-install bundled runtime 2026-06-12-screen-first.1 is not an exact match"
+            "post-install bundled runtime 2026-06-17-screen-first.5 is not an exact match"
         ));
         assert!(error
             .to_string()

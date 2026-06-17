@@ -4,12 +4,6 @@
 -- validated against real hardware. For now the bundle contract asserts that
 -- the LCD init slot was installed and leaves visible rendering to later steps.
 
-if type(vsn1_cli_runtime_identity) ~= "function" then
-  error("vsn1-cli runtime init is missing")
-end
-
-if type(vsn1_cli_state) ~= "table" then
-  error("vsn1-cli runtime state is missing")
-end
-
-return vsn1_cli_runtime_identity()
+assert(type(vsn1_cli_runtime_identity) == "function", "vsn1-cli runtime init is missing")
+assert(type(vsn1_cli_state) == "table", "vsn1-cli runtime state is missing")
+vsn1_cli_runtime_identity()

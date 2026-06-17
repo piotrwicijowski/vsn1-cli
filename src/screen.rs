@@ -392,8 +392,8 @@ pub fn compile_clear_lua(registry: &ScreenFieldRegistry, layer: ScreenLayer) -> 
 
 pub fn compile_activate_lua(layer: ScreenLayer) -> Result<String> {
     match layer {
-        ScreenLayer::Slow => Ok("vsn1_cli_state.s.u=os.clock()+5".to_string()),
-        ScreenLayer::Fast => Ok("vsn1_cli_state.f.u=os.clock()+1".to_string()),
+        ScreenLayer::Slow => Ok("A(5)".to_string()),
+        ScreenLayer::Fast => Ok("A(1)".to_string()),
         ScreenLayer::Persistent => Err(ScreenError::UnsupportedActivationLayer { layer }),
     }
 }
@@ -553,19 +553,19 @@ fn validate_assignments(
 
 fn compile_persistent_update(assignments: &[ScreenAssignment]) -> Result<String> {
     let mut args = [
-        String::from("p.v"),
-        String::from("p.n"),
-        String::from("p.x"),
-        String::from("p.t"),
-        String::from("p.b"),
-        String::from("p.s"),
-        String::from("p.d"),
-        String::from("p.i"),
-        String::from("{p.l~=0,p.h~=0}"),
-        String::from("p.k"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
+        String::from("nil"),
     ];
-    let mut clamp_min = String::from("p.l~=0");
-    let mut clamp_max = String::from("p.h~=0");
+    let mut clamp_min = None;
+    let mut clamp_max = None;
 
     for assignment in assignments {
         match assignment.field.runtime_key.as_str() {
@@ -577,8 +577,8 @@ fn compile_persistent_update(assignments: &[ScreenAssignment]) -> Result<String>
             "s" => args[5] = compile_lua_value(&assignment.value),
             "d" => args[6] = compile_lua_value(&assignment.value),
             "i" => args[7] = compile_lua_value(&assignment.value),
-            "l" => clamp_min = compile_lua_value(&assignment.value),
-            "h" => clamp_max = compile_lua_value(&assignment.value),
+            "l" => clamp_min = Some(compile_lua_value(&assignment.value)),
+            "h" => clamp_max = Some(compile_lua_value(&assignment.value)),
             "k" => args[9] = compile_lua_value(&assignment.value),
             runtime_key => {
                 return Err(ScreenError::InvalidRuntimeFieldSpec {
@@ -591,12 +591,15 @@ fn compile_persistent_update(assignments: &[ScreenAssignment]) -> Result<String>
         }
     }
 
-    args[8] = format!("{{{clamp_min},{clamp_max}}}");
+    if clamp_min.is_some() || clamp_max.is_some() {
+        args[8] = format!(
+            "{{{},{}}}",
+            clamp_min.unwrap_or_else(|| "nil".to_string()),
+            clamp_max.unwrap_or_else(|| "nil".to_string())
+        );
+    }
 
-    Ok(format!(
-        "local p=vsn1_cli_state.p;update_param({})",
-        args.join(",")
-    ))
+    Ok(format!("P({})", args.join(",")))
 }
 
 fn compile_overlay_update(assignment: &ScreenAssignment) -> Result<String> {
@@ -605,14 +608,12 @@ fn compile_overlay_update(assignment: &ScreenAssignment) -> Result<String> {
         assignment.field.runtime_key.as_str(),
         &assignment.value,
     ) {
-        (ScreenLayer::Slow, "m", ScreenValue::Text(_)) => Ok(format!(
-            "vsn1_cli_state.s.m={}",
-            compile_lua_value(&assignment.value)
-        )),
-        (ScreenLayer::Fast, "a", ScreenValue::Text(_)) => Ok(format!(
-            "vsn1_cli_state.f.a={}",
-            compile_lua_value(&assignment.value)
-        )),
+        (ScreenLayer::Slow, "m", ScreenValue::Text(_)) => {
+            Ok(format!("S({})", compile_lua_value(&assignment.value)))
+        }
+        (ScreenLayer::Fast, "a", ScreenValue::Text(_)) => {
+            Ok(format!("F({})", compile_lua_value(&assignment.value)))
+        }
         (layer, runtime_key, _) => Err(ScreenError::InvalidRuntimeFieldSpec {
             field: assignment.field.public_name.clone(),
             message: format!(
@@ -805,10 +806,7 @@ mod tests {
 
         let lua = compile_set_lua(&assignments, None).unwrap();
 
-        assert_eq!(
-            lua,
-            "local p=vsn1_cli_state.p;update_param(42,p.n,p.x,'Hello',p.b,p.s,p.d,p.i,{true,p.h~=0},p.k)"
-        );
+        assert_eq!(lua, "P(42,nil,nil,'Hello',nil,nil,nil,nil,{true,nil},nil)");
     }
 
     #[test]
@@ -826,8 +824,20 @@ mod tests {
 
         assert_eq!(
             lua,
-            "local p=vsn1_cli_state.p;update_param(p.v,p.n,p.x,'Hello',p.b,p.s,p.d,p.i,{p.l~=0,p.h~=0},p.k);vsn1_cli_state.s.m='Disk almost full';vsn1_cli_state.f.a='Tap'"
+            "P(nil,nil,nil,'Hello',nil,nil,nil,nil,nil,nil);S('Disk almost full');F('Tap')"
         );
+    }
+
+    #[test]
+    fn compiles_overlay_only_updates_with_dirty_marking() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+        let assignments = registry
+            .parse_assignments(["slow.message=Disk almost full"])
+            .unwrap();
+
+        let lua = compile_set_lua(&assignments, None).unwrap();
+
+        assert_eq!(lua, "S('Disk almost full')");
     }
 
     #[test]
@@ -852,23 +862,17 @@ mod tests {
         let slow_lua = compile_clear_lua(&registry, ScreenLayer::Slow).unwrap();
         let persistent_lua = compile_clear_lua(&registry, ScreenLayer::Persistent).unwrap();
 
-        assert_eq!(slow_lua, "vsn1_cli_state.s.m=''");
+        assert_eq!(slow_lua, "S('')");
         assert_eq!(
             persistent_lua,
-            "local p=vsn1_cli_state.p;update_param(0,0,127,'','',0,-1,{'---','---','---','---','---','---','---','---'},{false,false},0)"
+            "P(0,0,127,'','',0,-1,{'---','---','---','---','---','---','---','---'},{false,false},0)"
         );
     }
 
     #[test]
     fn compiles_temporary_layer_activation_helpers() {
-        assert_eq!(
-            compile_activate_lua(ScreenLayer::Slow).unwrap(),
-            "vsn1_cli_state.s.u=os.clock()+5"
-        );
-        assert_eq!(
-            compile_activate_lua(ScreenLayer::Fast).unwrap(),
-            "vsn1_cli_state.f.u=os.clock()+1"
-        );
+        assert_eq!(compile_activate_lua(ScreenLayer::Slow).unwrap(), "A(5)");
+        assert_eq!(compile_activate_lua(ScreenLayer::Fast).unwrap(), "A(1)");
 
         let error = compile_activate_lua(ScreenLayer::Persistent).unwrap_err();
         assert_eq!(

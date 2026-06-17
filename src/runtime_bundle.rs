@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
 
-pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-12-screen-first.1";
+pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-17-screen-first.5";
 
 const BUNDLED_RUNTIME_ROOT: &str = "assets/runtime";
 const MANIFEST_FILE_NAME: &str = "manifest.toml";
@@ -399,7 +399,7 @@ runtime_marker = "fixture:lcd-init"
 
         assert_eq!(
             error.to_string(),
-            "runtime asset hash mismatch for lcd-init.lua: expected aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, got b74e7db1ca4963b896c5aeef89f77c56abc8a730b5e3e2b8998f31baab99b8de"
+            "runtime asset hash mismatch for lcd-init.lua: expected aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, got 21cc312dc0da113b58ff40217cdafb0505e9602737287e43bfceb64c5997e4df"
         );
     }
 
@@ -488,7 +488,7 @@ runtime_marker = "fixture:lcd-init"
 
         assert_eq!(
             error.to_string(),
-            "invalid runtime manifest: owned slot lcd-init exceeds the Grid CONFIG payload limit after Lua framing: 918 bytes (maximum 908)"
+            "invalid runtime manifest: owned slot lcd-init exceeds the Grid CONFIG payload limit after Lua framing: 928 bytes (maximum 908)"
         );
     }
 }

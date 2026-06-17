@@ -1048,7 +1048,10 @@ mod tests {
         let writes = transport_factory.immediate_writes();
         let packet = &writes[0];
         assert_eq!(&packet[14..18], b"8081");
-        assert_eq!(&packet[32..packet.len() - 5], b"<?lua return 1 ?>");
+        assert_eq!(
+            &packet[32..packet.len() - 5],
+            b"<?lua --[[@cb]] return 1 ?>"
+        );
     }
 
     #[test]
