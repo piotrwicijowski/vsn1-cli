@@ -93,11 +93,14 @@ impl fmt::Display for ScreenError {
                 write!(f, "invalid bundled screen field `{field}`: {message}")
             }
             Self::InvalidAssignmentSyntax { input } => {
-                write!(f, "screen assignment `{input}` must use FIELD=VALUE syntax")
+                write!(
+                    f,
+                    "screen assignment `{input}` must use FIELD=VALUE syntax; run `vsn1-cli screen set --help` for examples"
+                )
             }
             Self::UnknownField { name, supported } => write!(
                 f,
-                "unknown screen field `{name}` (supported fields: {})",
+                "unknown screen field `{name}` (supported fields: {}); run `vsn1-cli screen set --help` for examples",
                 supported.join(", ")
             ),
             Self::InvalidValue {
@@ -731,7 +734,21 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unknown screen field `persistent.unknown` (supported fields: persistent.title, persistent.bottom, persistent.value, persistent.min, persistent.max, persistent.default, persistent.step, persistent.info, persistent.clamp_min, persistent.clamp_max, persistent.bank, slow.message, fast.action)"
+            "unknown screen field `persistent.unknown` (supported fields: persistent.title, persistent.bottom, persistent.value, persistent.min, persistent.max, persistent.default, persistent.step, persistent.info, persistent.clamp_min, persistent.clamp_max, persistent.bank, slow.message, fast.action); run `vsn1-cli screen set --help` for examples"
+        );
+    }
+
+    #[test]
+    fn parses_text_values_with_embedded_equals_signs() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+
+        let assignment = registry
+            .parse_assignment("persistent.title=left=right")
+            .unwrap();
+
+        assert_eq!(
+            assignment.value(),
+            &ScreenValue::Text("left=right".to_string())
         );
     }
 

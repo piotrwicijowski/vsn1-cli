@@ -12,13 +12,13 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ## Session handoff state
 
-- Overall status: `in progress`
-- Last completed step: `step 9`
-- In-progress step: `step 10`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after implementing runtime upgrade, repair, and remove with explicit managed-slot safety checks, managed-hash-based remove gating, and zero-length CONFIG clears for owned-slot removal)`
-- Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; subsequent hardware validation confirmed all step 9 behaviors pass visually on dx=0 dy=0: persistent rendering, screen clear, slow/fast activation, slow 5s timeout, fast 1s timeout, timer restart on re-activation, fast-to-slow fallback, fast-to-persistent fallback, and non-preemption of lower-layer updates while a higher-priority layer is active`
-- Open blockers: `step 10 hardware validation pending on a real device`
-- Next session start point: `run step 10 hardware validation for runtime upgrade, runtime repair, and runtime remove on a real device, then close the remaining hardware gate if the zero-length CONFIG clear path behaves as expected`
+- Overall status: `completed`
+- Last completed step: `step 11`
+- In-progress step: `none`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-17 after polishing CLI help/diagnostics, adding step 11 regression tests and user-facing docs, and confirming cross-target macOS build health from Linux)`
+- Last hardware validation: `2026-06-17 on Linux host: step 10 lifecycle validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime remove now succeeds using explicit empty-script writes to owned slots; post-remove status shows both owned slots drifted to the canonical empty callback hash and runtime verify fails as expected; runtime install restores an exact bundled match; runtime repair fails on an exact current install and succeeds after an out-of-band owned-slot modification in Grid Editor; runtime upgrade succeeds from an exact older managed runtime and reports upgrade source bundled version 2026-06-17-screen-first.5 before verifying an exact bundled-runtime match on 2026-06-17-screen-first.8`
+- Open blockers: `none`
+- Next session start point: `implementation checklist complete; begin new scoped work or follow-up hardware validation as needed`
 
 ## Rules for every step
 
@@ -128,17 +128,17 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 - [x] Implement `runtime remove` without touching unrelated device state.
 - [x] Keep ownership checks explicit in the runtime manifest and code paths.
 - [x] Add unit tests for upgrade eligibility, repair planning, and remove safety boundaries.
-- [ ] Hardware gate: confirm upgrade, repair, and remove work safely on real hardware.
+- [x] Hardware gate: confirm upgrade, repair, and remove work safely on real hardware.
 - [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 11: Hardening and release readiness
 
-- [ ] Polish CLI help text and diagnostics.
-- [ ] Add regression tests for packet encoding, manifest verification, field parsing, and command parsing.
-- [ ] Confirm Linux and macOS build health.
-- [ ] Write user-facing usage docs for `device`, `runtime`, and `screen`.
-- [ ] Record the hardware validation matrix and known limits such as the `5-10` visible updates/sec budget.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Polish CLI help text and diagnostics.
+- [x] Add regression tests for packet encoding, manifest verification, field parsing, and command parsing.
+- [x] Confirm Linux and macOS build health.
+- [x] Write user-facing usage docs for `device`, `runtime`, and `screen`.
+- [x] Record the hardware validation matrix and known limits such as the `5-10` visible updates/sec budget.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ## Step completion log
 
@@ -153,8 +153,8 @@ Update this section as work lands.
 - Step 7: `completed on 2026-06-17 - implemented runtime install with manifest-ordered owned-slot writes, owned-slot-only scope, post-install exact-match verification, CLI wiring, and step 7 unit tests; fixed the bundled lcd-init asset to fit the real Grid CONFIG payload limit, added bundle-size validation, corrected exact-match verification to compare against the framed stored CONFIG representation returned by fetches, validated runtime install/verify/status on /dev/ttyACM0 at dx=0 dy=0, and later fixed missing PAGEACTIVE + PAGESTORE persistence so install can survive reconnects`
 - Step 8: `completed on 2026-06-17 - added screen.rs bundled field-registry loading, typed layer/value metadata conversion from the manifest inventory, strict FIELD=VALUE parsing and validation, per-layer clear planning with runtime-default clear values, and step 8 unit tests covering lookup, parsing, value errors, and invalid bundled field specs`
 - Step 9: `completed on 2026-06-17 - implemented screen set/clear/activate CLI wiring, exact runtime gating before curated sends, replaced the placeholder bundled lcd-draw asset with a minimal real renderer, compared the curated IMMEDIATE path against the working POC and found that packet sending still matches while the script body differed materially, rewrote the bundled runtime plus host compiler around compact stored helper calls, then used fresh Grid Editor hardware feedback to confirm draw-slot invocation on dx=0 dy=0, fixed the missing palette global c in bundled runtime 2026-06-17-screen-first.4, restored visible output by adding glsb(255) to the owned lcd-init runtime in bundled version 2026-06-17-screen-first.5, addressed garbled slow-layer rendering by switching owned temporary-layer drawing to literal RGB colors in bundled version 2026-06-17-screen-first.6, fixed the temporary-layer activation regression introduced there in bundled version 2026-06-17-screen-first.7, simplified the slow-layer renderer in bundled version 2026-06-17-screen-first.8 to remove the remaining white-panel/black-bar artifact while staying under the Grid CONFIG payload limit, and completed hardware validation for layered visibility, timeout restart, fallback, and non-preemption behavior on dx=0 dy=0`
-- Step 10: `in progress on 2026-06-17 - implemented runtime upgrade, runtime repair, and runtime remove; added explicit managed-slot lifecycle gating, managed-hash-based remove safety checks, zero-length CONFIG clears for owned-slot removal, and step 10 unit coverage; software verification passes, hardware validation still pending`
-- Step 11: `not started`
+- Step 10: `completed on 2026-06-17 - implemented runtime upgrade, runtime repair, and runtime remove; added explicit managed-slot lifecycle gating, managed-hash-based remove safety checks, then corrected runtime remove on hardware by switching from zero-length CONFIG writes to explicit empty-script writes; hardware validation on /dev/ttyACM0 at dx=0 dy=0 confirmed remove, reinstall, negative repair/upgrade checks, positive repair after out-of-band drift, and positive upgrade from exact older bundled runtime 2026-06-17-screen-first.5 to 2026-06-17-screen-first.8`
+- Step 11: `completed on 2026-06-17 - polished clap help text across device/runtime/screen commands, tightened actionable diagnostics for targeting and field errors, added regression coverage for Lua framing, bundled runtime family loading, field parsing with embedded equals, command help text, and command parsing, confirmed Linux baseline checks plus cross-target macOS cargo check on x86_64-apple-darwin and aarch64-apple-darwin, and added user-facing README usage docs plus a validation matrix capturing current hardware coverage and the 5-10 visible updates/sec budget`
 
 ## Recommended session workflow
 

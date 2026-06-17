@@ -43,7 +43,9 @@ impl fmt::Display for ResolvedTarget {
 impl fmt::Display for TargetingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PartialCoordinates => f.write_str("both --dx and --dy must be provided together"),
+            Self::PartialCoordinates => f.write_str(
+                "both --dx and --dy must be provided together; omit both flags to use broadcast targeting",
+            ),
             Self::CoordinateOutOfRange { axis, value, max } => {
                 write!(
                     f,

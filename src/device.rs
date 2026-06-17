@@ -71,14 +71,14 @@ impl fmt::Display for DeviceError {
             Self::NoSupportedDevice => {
                 write!(
                     f,
-                    "no supported VSN1/Grid USB serial device found; run `vsn1-cli device list` to inspect discovery"
+                    "no supported VSN1/Grid USB serial device found; reconnect the device and run `vsn1-cli device list` to inspect discovery"
                 )
             }
             Self::AmbiguousDeviceSelection { port_names } => {
                 write!(
                     f,
-                    "multiple supported VSN1/Grid USB serial devices found ({:?}); `device info` needs exactly one visible device for now",
-                    port_names
+                    "multiple supported VSN1/Grid USB serial devices found ({}); `device info` currently requires exactly one visible device",
+                    port_names.join(", ")
                 )
             }
         }

@@ -357,6 +357,11 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_empty_existing_lua_frame_to_callback_only() {
+        assert_eq!(frame_lua("<?lua ?>"), "<?lua --[[@cb]] ?>");
+    }
+
+    #[test]
     fn encodes_immediate_packet_with_framed_payload() {
         let packet = encode_immediate_packet(&ImmediateWrite {
             target: GridTarget::BROADCAST,

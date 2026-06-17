@@ -32,11 +32,30 @@ use crate::transport::{SerialTransportFactory, SystemTransportFactory};
 
 pub use error::{Error, Result};
 
+const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install` to provision the bundled runtime before sending curated `screen` commands.";
+const DEVICE_INFO_AFTER_HELP: &str =
+    "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --dx 0 --dy 0";
+const RUNTIME_INSTALL_AFTER_HELP: &str = "Installs the current bundled runtime into the manifest-owned slots only, then verifies an exact bundled match.";
+const RUNTIME_VERIFY_AFTER_HELP: &str = "Fails unless every owned runtime slot matches the current bundled runtime version and content exactly.";
+const RUNTIME_UPGRADE_AFTER_HELP: &str = "Only upgrades from an exact older managed runtime. Drifted or partially modified owned slots must be repaired instead.";
+const RUNTIME_REPAIR_AFTER_HELP: &str =
+    "Reapplies the current bundled runtime when the owned slots are drifted or incomplete.";
+const RUNTIME_REMOVE_AFTER_HELP: &str =
+    "Clears only the manifest-owned runtime slots and leaves unrelated device state untouched.";
+const RUNTIME_STATUS_AFTER_HELP: &str = "Shows the owned-slot inspection result even when the runtime is missing, drifted, or from an older bundled version.";
+const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set fast.action=Tap --activate fast --dx 0 --dy 0\n\nCurated fields:\n  persistent.title\n  persistent.bottom\n  persistent.value\n  persistent.min\n  persistent.max\n  persistent.default\n  persistent.step\n  persistent.info\n  persistent.clamp_min\n  persistent.clamp_max\n  persistent.bank\n  slow.message\n  fast.action";
+const SCREEN_CLEAR_AFTER_HELP: &str =
+    "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0";
+const SCREEN_RAW_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen raw \"return update_param('t', 'Hello')\"\n  vsn1-cli screen raw \"lcd:ldrr(0,0,128,64); lcd:ldsw()\" --dx 0 --dy 0\n\n`screen raw` bypasses the curated field registry and runtime-shape validation.";
+const SCREEN_ACTIVATE_AFTER_HELP: &str =
+    "Examples:\n  vsn1-cli screen activate slow\n  vsn1-cli screen activate fast --dx 0 --dy 0";
+
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(
     name = "vsn1-cli",
     version,
-    about = "Standalone CLI for controlling the VSN1 display",
+    about = "Standalone CLI for controlling the VSN1 display over USB",
+    long_about = TOP_LEVEL_LONG_ABOUT,
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -46,8 +65,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum TopLevelCommand {
+    #[command(about = "Discover attached VSN1/Grid USB serial devices")]
     Device(DeviceArgs),
+    #[command(about = "Install, verify, inspect, and remove the bundled runtime")]
     Runtime(RuntimeArgs),
+    #[command(about = "Send curated or raw screen updates")]
     Screen(ScreenArgs),
 }
 
@@ -60,7 +82,12 @@ pub struct DeviceArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum DeviceCommand {
+    #[command(about = "List supported VSN1/Grid USB serial devices visible on this host")]
     List,
+    #[command(
+        about = "Open one discovered device and show the resolved module target",
+        after_help = DEVICE_INFO_AFTER_HELP
+    )]
     Info {
         #[command(flatten)]
         target: TargetArgs,
@@ -76,26 +103,50 @@ pub struct RuntimeArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum RuntimeCommand {
+    #[command(
+        about = "Install the bundled runtime into the owned device slots",
+        after_help = RUNTIME_INSTALL_AFTER_HELP
+    )]
     Install {
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Verify that the owned slots exactly match the bundled runtime",
+        after_help = RUNTIME_VERIFY_AFTER_HELP
+    )]
     Verify {
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Upgrade from an exact older managed runtime to the current bundle",
+        after_help = RUNTIME_UPGRADE_AFTER_HELP
+    )]
     Upgrade {
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Repair drifted or incomplete owned runtime slots",
+        after_help = RUNTIME_REPAIR_AFTER_HELP
+    )]
     Repair {
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Remove the bundled runtime from the owned device slots",
+        after_help = RUNTIME_REMOVE_AFTER_HELP
+    )]
     Remove {
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Inspect the owned runtime slots without enforcing an exact match",
+        after_help = RUNTIME_STATUS_AFTER_HELP
+    )]
     Status {
         #[command(flatten)]
         target: TargetArgs,
@@ -111,28 +162,56 @@ pub struct ScreenArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum ScreenCommand {
+    #[command(
+        about = "Update one or more curated screen fields",
+        after_help = SCREEN_SET_AFTER_HELP
+    )]
     Set {
-        #[arg(value_name = "FIELD=VALUE", required = true, num_args = 1..)]
+        #[arg(
+            value_name = "FIELD=VALUE",
+            required = true,
+            num_args = 1..,
+            help = "One or more curated screen field assignments"
+        )]
         assignments: Vec<String>,
-        #[arg(long, value_enum)]
+        #[arg(
+            long,
+            value_enum,
+            help = "Activate a temporary overlay layer after updating it"
+        )]
         activate: Option<ActivationLayer>,
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Clear one curated screen layer back to its runtime defaults",
+        after_help = SCREEN_CLEAR_AFTER_HELP
+    )]
     Clear {
-        #[arg(value_enum)]
+        #[arg(value_enum, help = "Layer to clear")]
         layer: Layer,
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Send expert-facing raw Lua over the immediate path",
+        after_help = SCREEN_RAW_AFTER_HELP
+    )]
     Raw {
-        #[arg(value_name = "LUA")]
+        #[arg(
+            value_name = "LUA",
+            help = "Raw Lua snippet to frame and send over the immediate path"
+        )]
         lua: String,
         #[command(flatten)]
         target: TargetArgs,
     },
+    #[command(
+        about = "Activate the slow or fast overlay layer",
+        after_help = SCREEN_ACTIVATE_AFTER_HELP
+    )]
     Activate {
-        #[arg(value_enum)]
+        #[arg(value_enum, help = "Temporary layer to activate")]
         layer: ActivationLayer,
         #[command(flatten)]
         target: TargetArgs,
@@ -141,9 +220,17 @@ pub enum ScreenCommand {
 
 #[derive(Debug, Args, Clone, Default, PartialEq, Eq)]
 pub struct TargetArgs {
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Explicit module x coordinate; omit both --dx and --dy to use broadcast targeting",
+        help_heading = "Targeting"
+    )]
     pub dx: Option<u16>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Explicit module y coordinate; omit both --dx and --dy to use broadcast targeting",
+        help_heading = "Targeting"
+    )]
     pub dy: Option<u16>,
 }
 
@@ -916,6 +1003,35 @@ mod tests {
     }
 
     #[test]
+    fn top_level_help_includes_command_descriptions() {
+        let mut cli_command = command();
+        let help = cli_command.render_help().to_string();
+
+        assert!(help.contains("Discover attached VSN1/Grid USB serial devices"));
+        assert!(help.contains("Install, verify, inspect, and remove the bundled runtime"));
+        assert!(help.contains("Send curated or raw screen updates"));
+    }
+
+    #[test]
+    fn screen_set_help_mentions_curated_assignments_and_activation() {
+        let mut screen_command = command().find_subcommand("screen").unwrap().clone();
+        let screen_help = screen_command.render_help().to_string();
+        assert!(screen_help.contains("Send curated or raw screen updates"));
+
+        let mut set_command = command()
+            .find_subcommand("screen")
+            .unwrap()
+            .find_subcommand("set")
+            .unwrap()
+            .clone();
+        let set_help = set_command.render_help().to_string();
+
+        assert!(set_help.contains("One or more curated screen field assignments"));
+        assert!(set_help.contains("Activate a temporary overlay layer after updating it"));
+        assert!(set_help.contains("persistent.title"));
+    }
+
+    #[test]
     fn parses_device_list() {
         let cli = try_parse_from(["vsn1-cli", "device", "list"]).unwrap();
 
@@ -1042,6 +1158,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_screen_set_assignment_with_embedded_equals() {
+        let cli =
+            try_parse_from(["vsn1-cli", "screen", "set", "persistent.title=left=right"]).unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: TopLevelCommand::Screen(ScreenArgs {
+                    command: ScreenCommand::Set {
+                        assignments: vec!["persistent.title=left=right".to_string()],
+                        activate: None,
+                        target: TargetArgs::default(),
+                    },
+                }),
+            }
+        );
+    }
+
+    #[test]
     fn device_info_defaults_to_broadcast_and_opens_the_selected_transport() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],
@@ -1095,7 +1230,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "multiple supported VSN1/Grid USB serial devices found ([\"/dev/ttyACM0\", \"/dev/ttyACM1\"]); `device info` needs exactly one visible device for now"
+            "multiple supported VSN1/Grid USB serial devices found (/dev/ttyACM0, /dev/ttyACM1); `device info` currently requires exactly one visible device"
         );
     }
 
@@ -1186,7 +1321,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "both --dx and --dy must be provided together"
+            "both --dx and --dy must be provided together; omit both flags to use broadcast targeting"
         );
     }
 

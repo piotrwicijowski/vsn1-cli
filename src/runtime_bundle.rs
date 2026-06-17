@@ -401,6 +401,26 @@ mod tests {
     }
 
     #[test]
+    fn bundled_runtime_family_is_sorted_and_includes_current_bundle() {
+        let bundles = RuntimeBundle::load_bundled_family().unwrap();
+
+        assert!(!bundles.is_empty());
+        assert_eq!(
+            bundles.last().unwrap().manifest().bundle_version,
+            BUNDLED_RUNTIME_VERSION
+        );
+
+        let versions = bundles
+            .iter()
+            .map(|bundle| bundle.manifest().bundle_version.as_str())
+            .collect::<Vec<_>>();
+        let mut sorted_versions = versions.clone();
+        sorted_versions.sort();
+
+        assert_eq!(versions, sorted_versions);
+    }
+
+    #[test]
     fn normalizes_line_endings_and_trailing_newlines_before_hashing() {
         let normalized = normalize_text_content("line one\r\nline two\r\n\r\n");
 
