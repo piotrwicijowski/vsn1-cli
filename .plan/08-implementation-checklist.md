@@ -14,11 +14,11 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 - Overall status: `in progress`
 - Last completed step: `step 8`
-- In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after adding screen.rs bundled field-registry loading, typed assignment parsing, per-layer clear planning, and step 8 unit tests)`
-- Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; follow-up cargo run -- runtime verify --dx 0 --dy 0 and cargo run -- runtime status --dx 0 --dy 0 both also reported exact-match compatible on dx=0 dy=0`
+- In-progress step: `step 9`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after fixing curated screen double-open handling and adding PAGEACTIVE + PAGESTORE persistence to runtime install with regression tests)`
+- Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; current session could not run step 9 hardware validation because cargo run -- device list reported no supported VSN1/Grid USB serial devices found`
 - Open blockers: `none`
-- Next session start point: `implement step 9 by wiring screen set/clear/activate through the runtime-gated screen registry and compiling curated mutations into runtime-helper Lua`
+- Next session start point: `hardware-validate that runtime install now survives reconnect via PAGESTORE, then replace the placeholder bundled LCD runtime with a real renderer/helper surface so screen set becomes visibly effective`
 
 ## Rules for every step
 
@@ -111,15 +111,15 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 9: Implement `screen set`, `screen clear`, and `screen activate`
 
-- [ ] Implement `screen set` with batched field updates in one command.
-- [ ] Require exact runtime verification before curated screen mutations.
-- [ ] Implement `screen clear <layer>` with explicit layer selection only.
-- [ ] Implement `screen activate slow|fast`.
-- [ ] Support combined `screen set ... --activate slow|fast`.
+- [x] Implement `screen set` with batched field updates in one command.
+- [x] Require exact runtime verification before curated screen mutations.
+- [x] Implement `screen clear <layer>` with explicit layer selection only.
+- [x] Implement `screen activate slow|fast`.
+- [x] Support combined `screen set ... --activate slow|fast`.
 - [ ] Compile high-level screen mutations into runtime-helper Lua calls.
-- [ ] Add unit tests for command parsing, mixed-field validation, runtime gating, and Lua compilation.
+- [x] Add unit tests for command parsing, mixed-field validation, runtime gating, and Lua compilation.
 - [ ] Hardware gate: confirm layered visibility, timeout restart, fallback, and non-preemption behavior.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 10: Complete runtime lifecycle commands
 
@@ -150,9 +150,9 @@ Update this section as work lands.
 - Step 4: `completed on 2026-06-17 - Linux host validation confirmed screen raw produces visible screen changes for both broadcast direct-draw and explicit dx=0 dy=0 raw update_param(...) and direct-draw commands`
 - Step 5: `completed on 2026-06-12 - added the first bundled runtime contract with hashed LCD init/draw assets, manifest loading, normalized hash verification, and an initial curated dotted field inventory derived from the validated POC slot ownership and update_param(...) payload shape`
 - Step 6: `completed on 2026-06-17 - software path added runtime.rs inspection, config-fetch verification, and CLI wiring; hardware validation on /dev/ttyACM0 at dx=0 dy=0 confirmed both drift detection before install and exact-match verification after bundled runtime install`
-- Step 7: `completed on 2026-06-17 - implemented runtime install with manifest-ordered owned-slot writes, owned-slot-only scope, post-install exact-match verification, CLI wiring, and step 7 unit tests; fixed the bundled lcd-init asset to fit the real Grid CONFIG payload limit, added bundle-size validation, corrected exact-match verification to compare against the framed stored CONFIG representation returned by fetches, and validated runtime install/verify/status on /dev/ttyACM0 at dx=0 dy=0`
+- Step 7: `completed on 2026-06-17 - implemented runtime install with manifest-ordered owned-slot writes, owned-slot-only scope, post-install exact-match verification, CLI wiring, and step 7 unit tests; fixed the bundled lcd-init asset to fit the real Grid CONFIG payload limit, added bundle-size validation, corrected exact-match verification to compare against the framed stored CONFIG representation returned by fetches, validated runtime install/verify/status on /dev/ttyACM0 at dx=0 dy=0, and later fixed missing PAGEACTIVE + PAGESTORE persistence so install can survive reconnects`
 - Step 8: `completed on 2026-06-17 - added screen.rs bundled field-registry loading, typed layer/value metadata conversion from the manifest inventory, strict FIELD=VALUE parsing and validation, per-layer clear planning with runtime-default clear values, and step 8 unit tests covering lookup, parsing, value errors, and invalid bundled field specs`
-- Step 9: `not started`
+- Step 9: `in progress on 2026-06-17 - implemented screen set/clear/activate CLI wiring, exact runtime gating before curated sends, persistent-field compilation through update_param(...) using current device-side state, direct temporary-layer state mutation/activation Lua, and step 9 software tests; hardware validation is still pending because no supported device was visible to the current session`
 - Step 10: `not started`
 - Step 11: `not started`
 

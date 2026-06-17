@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 
@@ -27,6 +27,17 @@ pub enum ScreenError {
         field: String,
         expected: &'static str,
         actual: String,
+    },
+    DuplicateFieldAssignment {
+        field: String,
+    },
+    InvalidActivationMix {
+        activate: ScreenLayer,
+        field: String,
+        field_layer: ScreenLayer,
+    },
+    UnsupportedActivationLayer {
+        layer: ScreenLayer,
     },
 }
 
@@ -97,6 +108,26 @@ impl fmt::Display for ScreenError {
                 f,
                 "invalid value for screen field `{field}`: expected {expected}, got `{actual}`"
             ),
+            Self::DuplicateFieldAssignment { field } => write!(
+                f,
+                "screen field `{field}` was assigned more than once in the same command"
+            ),
+            Self::InvalidActivationMix {
+                activate,
+                field,
+                field_layer,
+            } => write!(
+                f,
+                "screen set --activate {} only supports {}-layer assignments, but `{field}` belongs to the {} layer",
+                activate.as_str(),
+                activate.as_str(),
+                field_layer.as_str()
+            ),
+            Self::UnsupportedActivationLayer { layer } => write!(
+                f,
+                "screen activation is only supported for the `slow` and `fast` layers, got `{}`",
+                layer.as_str()
+            ),
         }
     }
 }
@@ -108,7 +139,10 @@ impl StdError for ScreenError {
             Self::InvalidRuntimeFieldSpec { .. }
             | Self::InvalidAssignmentSyntax { .. }
             | Self::UnknownField { .. }
-            | Self::InvalidValue { .. } => None,
+            | Self::InvalidValue { .. }
+            | Self::DuplicateFieldAssignment { .. }
+            | Self::InvalidActivationMix { .. }
+            | Self::UnsupportedActivationLayer { .. } => None,
         }
     }
 }
@@ -314,6 +348,56 @@ impl ScreenFieldRegistry {
     }
 }
 
+pub fn compile_set_lua(
+    assignments: &[ScreenAssignment],
+    activate: Option<ScreenLayer>,
+) -> Result<String> {
+    validate_assignments(assignments, activate)?;
+
+    let mut statements = Vec::new();
+
+    let persistent = assignments
+        .iter()
+        .filter(|assignment| assignment.field.layer == ScreenLayer::Persistent)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !persistent.is_empty() {
+        statements.push(compile_persistent_update(&persistent)?);
+    }
+
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| assignment.field.layer == ScreenLayer::Slow)
+    {
+        statements.push(compile_overlay_update(assignment)?);
+    }
+
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| assignment.field.layer == ScreenLayer::Fast)
+    {
+        statements.push(compile_overlay_update(assignment)?);
+    }
+
+    if let Some(layer) = activate {
+        statements.push(compile_activate_lua(layer)?);
+    }
+
+    Ok(statements.join(";"))
+}
+
+pub fn compile_clear_lua(registry: &ScreenFieldRegistry, layer: ScreenLayer) -> Result<String> {
+    compile_set_lua(&registry.clear_plan(layer), None)
+}
+
+pub fn compile_activate_lua(layer: ScreenLayer) -> Result<String> {
+    match layer {
+        ScreenLayer::Slow => Ok("vsn1_cli_state.s.u=os.clock()+5".to_string()),
+        ScreenLayer::Fast => Ok("vsn1_cli_state.f.u=os.clock()+1".to_string()),
+        ScreenLayer::Persistent => Err(ScreenError::UnsupportedActivationLayer { layer }),
+    }
+}
+
 fn build_field_spec(runtime_field: &RuntimeFieldSpec) -> Result<ScreenFieldSpec> {
     let layer = ScreenLayer::parse(&runtime_field.layer, &runtime_field.name)?;
     let value_kind = ScreenValueKind::parse(&runtime_field.value_kind, &runtime_field.name)?;
@@ -433,6 +517,145 @@ fn parse_bool(raw_value: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn validate_assignments(
+    assignments: &[ScreenAssignment],
+    activate: Option<ScreenLayer>,
+) -> Result<()> {
+    let mut seen = HashSet::with_capacity(assignments.len());
+    for assignment in assignments {
+        if !seen.insert(assignment.field.public_name.clone()) {
+            return Err(ScreenError::DuplicateFieldAssignment {
+                field: assignment.field.public_name.clone(),
+            });
+        }
+    }
+
+    if let Some(activate) = activate {
+        if activate == ScreenLayer::Persistent {
+            return Err(ScreenError::UnsupportedActivationLayer { layer: activate });
+        }
+
+        for assignment in assignments {
+            if assignment.field.layer != activate {
+                return Err(ScreenError::InvalidActivationMix {
+                    activate,
+                    field: assignment.field.public_name.clone(),
+                    field_layer: assignment.field.layer,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn compile_persistent_update(assignments: &[ScreenAssignment]) -> Result<String> {
+    let mut args = [
+        String::from("p.v"),
+        String::from("p.n"),
+        String::from("p.x"),
+        String::from("p.t"),
+        String::from("p.b"),
+        String::from("p.s"),
+        String::from("p.d"),
+        String::from("p.i"),
+        String::from("{p.l~=0,p.h~=0}"),
+        String::from("p.k"),
+    ];
+    let mut clamp_min = String::from("p.l~=0");
+    let mut clamp_max = String::from("p.h~=0");
+
+    for assignment in assignments {
+        match assignment.field.runtime_key.as_str() {
+            "v" => args[0] = compile_lua_value(&assignment.value),
+            "n" => args[1] = compile_lua_value(&assignment.value),
+            "x" => args[2] = compile_lua_value(&assignment.value),
+            "t" => args[3] = compile_lua_value(&assignment.value),
+            "b" => args[4] = compile_lua_value(&assignment.value),
+            "s" => args[5] = compile_lua_value(&assignment.value),
+            "d" => args[6] = compile_lua_value(&assignment.value),
+            "i" => args[7] = compile_lua_value(&assignment.value),
+            "l" => clamp_min = compile_lua_value(&assignment.value),
+            "h" => clamp_max = compile_lua_value(&assignment.value),
+            "k" => args[9] = compile_lua_value(&assignment.value),
+            runtime_key => {
+                return Err(ScreenError::InvalidRuntimeFieldSpec {
+                    field: assignment.field.public_name.clone(),
+                    message: format!(
+                    "unsupported persistent runtime key `{runtime_key}` for host Lua compilation"
+                ),
+                })
+            }
+        }
+    }
+
+    args[8] = format!("{{{clamp_min},{clamp_max}}}");
+
+    Ok(format!(
+        "local p=vsn1_cli_state.p;update_param({})",
+        args.join(",")
+    ))
+}
+
+fn compile_overlay_update(assignment: &ScreenAssignment) -> Result<String> {
+    match (
+        assignment.field.layer,
+        assignment.field.runtime_key.as_str(),
+        &assignment.value,
+    ) {
+        (ScreenLayer::Slow, "m", ScreenValue::Text(_)) => Ok(format!(
+            "vsn1_cli_state.s.m={}",
+            compile_lua_value(&assignment.value)
+        )),
+        (ScreenLayer::Fast, "a", ScreenValue::Text(_)) => Ok(format!(
+            "vsn1_cli_state.f.a={}",
+            compile_lua_value(&assignment.value)
+        )),
+        (layer, runtime_key, _) => Err(ScreenError::InvalidRuntimeFieldSpec {
+            field: assignment.field.public_name.clone(),
+            message: format!(
+                "unsupported {}-layer runtime mapping `{runtime_key}` for host Lua compilation",
+                layer.as_str()
+            ),
+        }),
+    }
+}
+
+fn compile_lua_value(value: &ScreenValue) -> String {
+    match value {
+        ScreenValue::Text(text) => quote_lua_string(text),
+        ScreenValue::Int(value) => value.to_string(),
+        ScreenValue::Bool(value) => value.to_string(),
+        ScreenValue::TextList(items) => format!(
+            "{{{}}}",
+            items
+                .iter()
+                .map(|item| quote_lua_string(item))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+fn quote_lua_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('\'');
+
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(character),
+        }
+    }
+
+    escaped.push('\'');
+    escaped
 }
 
 #[cfg(test)]
@@ -567,6 +790,106 @@ mod tests {
             .find(|assignment| assignment.field().public_name() == "persistent.default")
             .unwrap();
         assert_eq!(default.value(), &ScreenValue::Int(-1));
+    }
+
+    #[test]
+    fn compiles_partial_persistent_updates_without_resetting_other_fields() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+        let assignments = registry
+            .parse_assignments([
+                "persistent.title=Hello",
+                "persistent.value=42",
+                "persistent.clamp_min=true",
+            ])
+            .unwrap();
+
+        let lua = compile_set_lua(&assignments, None).unwrap();
+
+        assert_eq!(
+            lua,
+            "local p=vsn1_cli_state.p;update_param(42,p.n,p.x,'Hello',p.b,p.s,p.d,p.i,{true,p.h~=0},p.k)"
+        );
+    }
+
+    #[test]
+    fn compiles_mixed_layer_updates_into_one_runtime_helper_script() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+        let assignments = registry
+            .parse_assignments([
+                "persistent.title=Hello",
+                "slow.message=Disk almost full",
+                "fast.action=Tap",
+            ])
+            .unwrap();
+
+        let lua = compile_set_lua(&assignments, None).unwrap();
+
+        assert_eq!(
+            lua,
+            "local p=vsn1_cli_state.p;update_param(p.v,p.n,p.x,'Hello',p.b,p.s,p.d,p.i,{p.l~=0,p.h~=0},p.k);vsn1_cli_state.s.m='Disk almost full';vsn1_cli_state.f.a='Tap'"
+        );
+    }
+
+    #[test]
+    fn rejects_mixed_layer_updates_when_activation_is_requested() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+        let assignments = registry
+            .parse_assignments(["persistent.title=Hello", "slow.message=Disk almost full"])
+            .unwrap();
+
+        let error = compile_set_lua(&assignments, Some(ScreenLayer::Slow)).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "screen set --activate slow only supports slow-layer assignments, but `persistent.title` belongs to the persistent layer"
+        );
+    }
+
+    #[test]
+    fn compiles_layer_clear_using_runtime_defaults() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+
+        let slow_lua = compile_clear_lua(&registry, ScreenLayer::Slow).unwrap();
+        let persistent_lua = compile_clear_lua(&registry, ScreenLayer::Persistent).unwrap();
+
+        assert_eq!(slow_lua, "vsn1_cli_state.s.m=''");
+        assert_eq!(
+            persistent_lua,
+            "local p=vsn1_cli_state.p;update_param(0,0,127,'','',0,-1,{'---','---','---','---','---','---','---','---'},{false,false},0)"
+        );
+    }
+
+    #[test]
+    fn compiles_temporary_layer_activation_helpers() {
+        assert_eq!(
+            compile_activate_lua(ScreenLayer::Slow).unwrap(),
+            "vsn1_cli_state.s.u=os.clock()+5"
+        );
+        assert_eq!(
+            compile_activate_lua(ScreenLayer::Fast).unwrap(),
+            "vsn1_cli_state.f.u=os.clock()+1"
+        );
+
+        let error = compile_activate_lua(ScreenLayer::Persistent).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "screen activation is only supported for the `slow` and `fast` layers, got `persistent`"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_field_assignments() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+        let assignments = registry
+            .parse_assignments(["slow.message=one", "slow.message=two"])
+            .unwrap();
+
+        let error = compile_set_lua(&assignments, None).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "screen field `slow.message` was assigned more than once in the same command"
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::protocol::{
     self, ConfigFetch, ConfigLocation, ConfigWrite, GridTarget, Heartbeat, PacketIdentity,
-    ProtocolError,
+    PageActive, PageStore, ProtocolError,
 };
 use crate::runtime_bundle::{
     normalized_sha256, OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle, RuntimeBundleError,
@@ -16,15 +16,21 @@ use crate::transport::{SerialTransport, TransportError};
 
 const CONNECTION_STABILIZATION_DELAY: Duration = Duration::from_millis(150);
 const CONFIG_WRITE_SETTLE_DELAY: Duration = Duration::from_millis(150);
+const PAGE_CHANGE_SETTLE_DELAY: Duration = Duration::from_millis(150);
 const HEARTBEAT_BOOTSTRAP_DELAY: Duration = Duration::from_millis(300);
 const READ_BACK_TOTAL_WINDOW: Duration = Duration::from_millis(1200);
 const READ_BACK_IDLE_WINDOW: Duration = Duration::from_millis(250);
+const PAGE_STORE_TOTAL_WINDOW: Duration = Duration::from_millis(8000);
+const PAGE_STORE_IDLE_WINDOW: Duration = Duration::from_millis(500);
 const READ_BACK_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 const GRID_CONST_ETX: u8 = 0x03;
 const GRID_CONST_EOT: u8 = 0x04;
 const GRID_CONST_LF: u8 = 0x0a;
 const GRID_CLASS_CONFIG: usize = 0x060;
+const GRID_CLASS_PAGESTORE: usize = 0x061;
+const GRID_INSTR_ACKNOWLEDGE: usize = 0x0a;
+const GRID_INSTR_NACKNOWLEDGE: usize = 0x0b;
 const GRID_INSTR_REPORT: usize = 0x0d;
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -54,6 +60,10 @@ pub trait RuntimeSlotReader {
 
 pub trait RuntimeSlotWriter {
     fn write_owned_slot(&mut self, target: ResolvedTarget, asset: &RuntimeAsset) -> Result<()>;
+}
+
+pub trait RuntimePageStorer {
+    fn store_page(&mut self, target: ResolvedTarget, page: u8) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,6 +373,37 @@ where
     }
 }
 
+impl<T> RuntimePageStorer for TransportRuntimeSlotReader<T>
+where
+    T: SerialTransport,
+{
+    fn store_page(&mut self, target: ResolvedTarget, page: u8) -> Result<()> {
+        self.transport.clear_input()?;
+
+        let page_active_packet = protocol::encode_page_active_packet(&PageActive {
+            target: target.grid_target(),
+            page,
+            identity: self.next_identity(),
+        })?;
+        self.transport.write_config(&page_active_packet)?;
+        thread::sleep(PAGE_CHANGE_SETTLE_DELAY);
+
+        let page_store_packet = protocol::encode_page_store_packet(&PageStore {
+            target: target.grid_target(),
+            identity: self.next_identity(),
+        })?;
+        self.transport.write_config(&page_store_packet)?;
+
+        let inbound = read_transport_until_idle(
+            &mut self.transport,
+            PAGE_STORE_TOTAL_WINDOW,
+            PAGE_STORE_IDLE_WINDOW,
+        )?;
+
+        extract_page_store_ack(&inbound, target)
+    }
+}
+
 pub fn inspect_bundled_runtime<R>(
     requested_target: ResolvedTarget,
     reader: &mut R,
@@ -429,7 +470,7 @@ pub fn install_bundled_runtime<R>(
     reader: &mut R,
 ) -> Result<RuntimeInstallReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
 {
     install_runtime_with_bundle_dir(
         crate::runtime_bundle::bundled_runtime_dir(),
@@ -444,12 +485,20 @@ pub fn install_runtime_with_bundle_dir<R>(
     reader: &mut R,
 ) -> Result<RuntimeInstallReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
 {
     let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
+    let mut stored_pages = Vec::new();
 
     for asset in bundle.assets() {
+        if !stored_pages.contains(&asset.slot.page) {
+            stored_pages.push(asset.slot.page);
+        }
         reader.write_owned_slot(requested_target, asset)?;
+    }
+
+    for page in stored_pages {
+        reader.store_page(requested_target, page)?;
     }
 
     let verification_report = inspect_runtime_bundle(&bundle, requested_target, reader)?;
@@ -642,6 +691,63 @@ fn extract_single_config_report(
     }
 }
 
+fn extract_page_store_ack(inbound: &[u8], requested_target: ResolvedTarget) -> Result<()> {
+    let mut acknowledgements = Vec::new();
+    let mut rejections = Vec::new();
+
+    for frame in split_complete_frames(inbound) {
+        if !verify_grid_frame_checksum(frame) {
+            continue;
+        }
+
+        let Some(source_x) = parse_grid_coordinate_range(frame, 10) else {
+            continue;
+        };
+        let Some(source_y) = parse_grid_coordinate_range(frame, 12) else {
+            continue;
+        };
+        let source_target = GridTarget::new(source_x, source_y);
+
+        for block in split_class_blocks(frame) {
+            if parse_ascii_hex_range(block, 1, 3) != Some(GRID_CLASS_PAGESTORE) {
+                continue;
+            }
+
+            match parse_ascii_hex_range(block, 4, 1) {
+                Some(GRID_INSTR_ACKNOWLEDGE) => acknowledgements.push(source_target),
+                Some(GRID_INSTR_NACKNOWLEDGE) => rejections.push(source_target),
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(actual_target) = rejections.into_iter().next() {
+        return Err(RuntimeError::verification_failed(format!(
+            "page store was rejected by dx={} dy={}",
+            actual_target.dx, actual_target.dy
+        )));
+    }
+
+    match acknowledgements.as_slice() {
+        [] => Err(RuntimeError::unexpected_response(
+            "no PAGESTORE acknowledge was observed in read-back",
+        )),
+        [actual_target] => match requested_target {
+            ResolvedTarget::Explicit(expected) if *actual_target != expected => {
+                Err(RuntimeError::verification_failed(format!(
+                    "page store acknowledged from dx={} dy={} instead of the requested target",
+                    actual_target.dx, actual_target.dy
+                )))
+            }
+            _ => Ok(()),
+        },
+        targets => Err(RuntimeError::unexpected_response(format!(
+            "multiple PAGESTORE acknowledgements were returned ({})",
+            format_targets(targets)
+        ))),
+    }
+}
+
 fn split_complete_frames(bytes: &[u8]) -> Vec<&[u8]> {
     let mut frames = Vec::new();
     let mut frame_start = 0;
@@ -768,14 +874,20 @@ mod tests {
     #[derive(Default)]
     struct RecordingSlotAccessor {
         writes: Vec<String>,
+        stored_pages: Vec<u8>,
         slots: BTreeMap<String, RuntimeSlotRead>,
         persist_writes: bool,
         drifted_slot: Option<String>,
+        reject_page_store: bool,
     }
 
     impl RecordingSlotAccessor {
         fn write_order(&self) -> &[String] {
             &self.writes
+        }
+
+        fn stored_pages(&self) -> &[u8] {
+            &self.stored_pages
         }
     }
 
@@ -817,6 +929,20 @@ mod tests {
             }
 
             Ok(())
+        }
+    }
+
+    impl RuntimePageStorer for RecordingSlotAccessor {
+        fn store_page(&mut self, _target: ResolvedTarget, page: u8) -> Result<()> {
+            self.stored_pages.push(page);
+
+            if self.reject_page_store {
+                Err(RuntimeError::verification_failed(
+                    "page store was rejected by dx=0 dy=0",
+                ))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -979,6 +1105,7 @@ runtime_marker = "fixture:first"
             accessor.write_order(),
             &["first".to_string(), "second".to_string()]
         );
+        assert_eq!(accessor.stored_pages(), &[0]);
         assert_eq!(
             report
                 .installed_slots()
@@ -988,6 +1115,26 @@ runtime_marker = "fixture:first"
             vec!["first", "second"]
         );
         assert!(report.verification_report().is_exact_match());
+    }
+
+    #[test]
+    fn install_fails_when_page_store_is_rejected() {
+        let mut accessor = RecordingSlotAccessor {
+            reject_page_store: true,
+            ..Default::default()
+        };
+
+        let error = install_bundled_runtime(
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "runtime verification failed: page store was rejected by dx=0 dy=0"
+        );
+        assert_eq!(accessor.stored_pages(), &[0]);
     }
 
     #[test]
