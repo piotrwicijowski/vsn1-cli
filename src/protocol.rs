@@ -15,11 +15,18 @@ const GRID_CONST_EOB: u8 = 0x17;
 
 const GRID_CLASS_CONFIG: u16 = 0x060;
 const GRID_CLASS_IMMEDIATE: u16 = 0x085;
+const GRID_CLASS_HEARTBEAT: u16 = 0x010;
+const GRID_HEARTBEAT_EDITOR_TYPE: u8 = 0xff;
+const GRID_HEARTBEAT_EDITOR_HWCFG: u8 = 0xff;
 const GRID_INSTR_EXECUTE: u8 = 0x0e;
+const GRID_INSTR_FETCH: u8 = 0x0f;
 
 const GRID_PROTOCOL_VERSION_MAJOR: u8 = 0x01;
 const GRID_PROTOCOL_VERSION_MINOR: u8 = 0x05;
 const GRID_PROTOCOL_VERSION_PATCH: u8 = 0x01;
+const GRID_EDITOR_VERSION_MAJOR: u8 = 0x01;
+const GRID_EDITOR_VERSION_MINOR: u8 = 0x06;
+const GRID_EDITOR_VERSION_PATCH: u8 = 0x05;
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -61,6 +68,18 @@ pub struct ConfigWrite<'a> {
     pub target: GridTarget,
     pub location: ConfigLocation,
     pub lua: &'a str,
+    pub identity: PacketIdentity,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ConfigFetch {
+    pub target: GridTarget,
+    pub location: ConfigLocation,
+    pub identity: PacketIdentity,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct Heartbeat {
     pub identity: PacketIdentity,
 }
 
@@ -162,6 +181,40 @@ pub fn encode_config_packet(write: &ConfigWrite<'_>) -> Result<Vec<u8>> {
     class.push(GRID_CONST_EOT);
 
     encode_packet(write.target, write.identity, &class)
+}
+
+pub fn encode_config_fetch_packet(fetch: &ConfigFetch) -> Result<Vec<u8>> {
+    let mut class = vec![GRID_CONST_STX];
+    write_ascii_hex(&mut class, 3, GRID_CLASS_CONFIG as usize);
+    write_ascii_hex(&mut class, 1, GRID_INSTR_FETCH as usize);
+    write_ascii_hex(&mut class, 2, GRID_PROTOCOL_VERSION_MAJOR as usize);
+    write_ascii_hex(&mut class, 2, GRID_PROTOCOL_VERSION_MINOR as usize);
+    write_ascii_hex(&mut class, 2, GRID_PROTOCOL_VERSION_PATCH as usize);
+    write_ascii_hex(&mut class, 2, fetch.location.page as usize);
+    write_ascii_hex(&mut class, 2, fetch.location.element as usize);
+    write_ascii_hex(&mut class, 2, fetch.location.event as usize);
+    write_ascii_hex(&mut class, 4, 0);
+    class.push(GRID_CONST_ETX);
+    class.push(GRID_CONST_EOT);
+
+    encode_packet(fetch.target, fetch.identity, &class)
+}
+
+pub fn encode_heartbeat_packet(heartbeat: &Heartbeat) -> Result<Vec<u8>> {
+    let mut class = vec![GRID_CONST_STX];
+    write_ascii_hex(&mut class, 3, GRID_CLASS_HEARTBEAT as usize);
+    write_ascii_hex(&mut class, 1, GRID_INSTR_EXECUTE as usize);
+    write_ascii_hex(&mut class, 2, GRID_HEARTBEAT_EDITOR_TYPE as usize);
+    write_ascii_hex(&mut class, 2, GRID_HEARTBEAT_EDITOR_HWCFG as usize);
+    write_ascii_hex(&mut class, 2, GRID_EDITOR_VERSION_MAJOR as usize);
+    write_ascii_hex(&mut class, 2, GRID_EDITOR_VERSION_MINOR as usize);
+    write_ascii_hex(&mut class, 2, GRID_EDITOR_VERSION_PATCH as usize);
+    write_ascii_hex(&mut class, 2, 0);
+    write_ascii_hex(&mut class, 2, 0);
+    class.push(GRID_CONST_ETX);
+    class.push(GRID_CONST_EOT);
+
+    encode_packet(GridTarget::BROADCAST, heartbeat.identity, &class)
 }
 
 fn encode_packet(
@@ -309,6 +362,35 @@ mod tests {
                 value: 129,
             }
         );
+    }
+
+    #[test]
+    fn encodes_config_fetch_packet_with_versioned_header() {
+        let packet = encode_config_fetch_packet(&ConfigFetch {
+            target: GridTarget::new(0, 1),
+            location: ConfigLocation::new(0xff, 13, 8),
+            identity: PacketIdentity::new(0x55, 0x02),
+        })
+        .unwrap();
+
+        assert_eq!(&packet[23..28], b"\x02060f");
+        assert_eq!(&packet[28..34], b"010501");
+        assert_eq!(&packet[34..40], b"ff0d08");
+        assert_eq!(&packet[40..44], b"0000");
+        assert!(packet_has_valid_checksum(&packet));
+    }
+
+    #[test]
+    fn encodes_heartbeat_packet_for_editor_session_bootstrap() {
+        let packet = encode_heartbeat_packet(&Heartbeat {
+            identity: PacketIdentity::new(0xaa, 0x03),
+        })
+        .unwrap();
+
+        assert_eq!(&packet[14..18], b"0000");
+        assert_eq!(&packet[23..28], b"\x02010e");
+        assert_eq!(&packet[28..42], b"ffff0106050000");
+        assert!(packet_has_valid_checksum(&packet));
     }
 
     fn immediate_payload(packet: &[u8]) -> &[u8] {

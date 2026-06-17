@@ -7,6 +7,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
+
 pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-12-screen-first.1";
 
 const BUNDLED_RUNTIME_ROOT: &str = "assets/runtime";
@@ -82,6 +84,7 @@ pub struct RuntimeAsset {
     pub source_path: PathBuf,
     pub original_content: String,
     pub normalized_content: String,
+    pub stored_content: String,
     pub normalized_sha256: String,
 }
 
@@ -269,7 +272,9 @@ fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsse
             message: error.to_string(),
         })?;
     let normalized_content = normalize_text_content(&original_content);
-    let actual_hash = sha256_hex(normalized_content.as_bytes());
+    validate_installable_script_length(&slot, &normalized_content)?;
+    let stored_content = normalize_text_content(&frame_lua(&normalized_content));
+    let actual_hash = sha256_hex(stored_content.as_bytes());
 
     if actual_hash != slot.normalized_sha256 {
         return Err(RuntimeBundleError::AssetHashMismatch {
@@ -284,6 +289,7 @@ fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsse
         source_path,
         original_content,
         normalized_content,
+        stored_content,
         normalized_sha256: actual_hash,
     })
 }
@@ -301,6 +307,22 @@ fn resolve_asset_path(root: &Path, asset: &str) -> Result<PathBuf> {
     }
 
     Ok(root.join(asset_path))
+}
+
+fn validate_installable_script_length(slot: &OwnedRuntimeSlot, content: &str) -> Result<()> {
+    let framed_len = frame_lua(content).len();
+    let max_len = GRID_MAX_LUA_BYTES - 1;
+
+    if framed_len > max_len {
+        return Err(RuntimeBundleError::InvalidManifest {
+            message: format!(
+                "owned slot {} exceeds the Grid CONFIG payload limit after Lua framing: {} bytes (maximum {})",
+                slot.name, framed_len, max_len
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -377,7 +399,7 @@ runtime_marker = "fixture:lcd-init"
 
         assert_eq!(
             error.to_string(),
-            "runtime asset hash mismatch for lcd-init.lua: expected aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, got 0805bfdc02e872ed322a4a4e440ae985f3a4335f4dd59f3d373dfaf2a68a4a3c"
+            "runtime asset hash mismatch for lcd-init.lua: expected aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, got b74e7db1ca4963b896c5aeef89f77c56abc8a730b5e3e2b8998f31baab99b8de"
         );
     }
 
@@ -429,6 +451,44 @@ notes = "fixture"
         assert_eq!(
             error.to_string(),
             "invalid runtime manifest: duplicate field inventory entry persistent.title"
+        );
+    }
+
+    #[test]
+    fn rejects_owned_slot_scripts_that_exceed_the_grid_config_limit() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        let oversized = "a".repeat(909);
+        let hash = normalized_sha256(&frame_lua(&oversized));
+
+        fs::write(root.join("lcd-init.lua"), oversized).unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            format!(
+                r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+normalized_sha256 = "{hash}"
+runtime_marker = "fixture:lcd-init"
+"#
+            ),
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: owned slot lcd-init exceeds the Grid CONFIG payload limit after Lua framing: 918 bytes (maximum 908)"
         );
     }
 }

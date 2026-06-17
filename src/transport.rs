@@ -1,12 +1,12 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::io;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::time::Duration;
 
 use serialport::SerialPort;
 
-use crate::protocol::{self, ConfigWrite, ImmediateWrite};
+use crate::protocol::{self, ConfigFetch, ConfigWrite, Heartbeat, ImmediateWrite};
 use crate::Result;
 
 const SERIAL_TIMEOUT: Duration = Duration::from_millis(250);
@@ -16,6 +16,7 @@ pub enum TransportOperation {
     Open,
     Immediate,
     Config,
+    Read,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,9 @@ pub struct TransportError {
 pub trait SerialTransport {
     fn write_immediate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError>;
     fn write_config(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError>;
+    fn bytes_to_read(&self) -> std::result::Result<u32, TransportError>;
+    fn read(&mut self, buffer: &mut [u8]) -> std::result::Result<usize, TransportError>;
+    fn clear_input(&mut self) -> std::result::Result<(), TransportError>;
 }
 
 pub trait SerialTransportFactory {
@@ -57,6 +61,7 @@ pub struct FakeTransport {
     config_writes: Vec<Vec<u8>>,
     next_immediate_error: Option<TransportError>,
     next_config_error: Option<TransportError>,
+    next_read_error: Option<TransportError>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -87,6 +92,13 @@ impl TransportError {
         }
     }
 
+    pub fn read(message: impl Into<String>) -> Self {
+        Self {
+            operation: TransportOperation::Read,
+            message: message.into(),
+        }
+    }
+
     pub fn from_io(operation: TransportOperation, error: io::Error) -> Self {
         Self {
             operation,
@@ -105,10 +117,12 @@ impl fmt::Display for TransportError {
             TransportOperation::Open => "transport open",
             TransportOperation::Immediate => "immediate",
             TransportOperation::Config => "config",
+            TransportOperation::Read => "transport read",
         };
 
         match self.operation {
             TransportOperation::Open => write!(f, "{operation} failed: {}", self.message),
+            TransportOperation::Read => write!(f, "{operation} failed: {}", self.message),
             _ => write!(f, "{operation} transport write failed: {}", self.message),
         }
     }
@@ -155,6 +169,24 @@ impl SerialTransport for SystemSerialTransport {
 
         Ok(())
     }
+
+    fn bytes_to_read(&self) -> std::result::Result<u32, TransportError> {
+        self.port
+            .bytes_to_read()
+            .map_err(|error| TransportError::read(error.to_string()))
+    }
+
+    fn read(&mut self, buffer: &mut [u8]) -> std::result::Result<usize, TransportError> {
+        self.port
+            .read(buffer)
+            .map_err(|error| TransportError::from_io(TransportOperation::Read, error))
+    }
+
+    fn clear_input(&mut self) -> std::result::Result<(), TransportError> {
+        self.port
+            .clear(serialport::ClearBuffer::Input)
+            .map_err(|error| TransportError::read(error.to_string()))
+    }
 }
 
 impl FakeTransport {
@@ -164,6 +196,10 @@ impl FakeTransport {
 
     pub fn fail_next_config(&mut self, error: TransportError) {
         self.next_config_error = Some(error);
+    }
+
+    pub fn fail_next_read(&mut self, error: TransportError) {
+        self.next_read_error = Some(error);
     }
 
     pub fn immediate_writes(&self) -> &[Vec<u8>] {
@@ -224,6 +260,22 @@ impl SerialTransport for FakeTransport {
         self.config_writes.push(packet.to_vec());
         Ok(())
     }
+
+    fn bytes_to_read(&self) -> std::result::Result<u32, TransportError> {
+        Ok(0)
+    }
+
+    fn read(&mut self, _buffer: &mut [u8]) -> std::result::Result<usize, TransportError> {
+        if let Some(error) = self.next_read_error.take() {
+            return Err(error);
+        }
+
+        Ok(0)
+    }
+
+    fn clear_input(&mut self) -> std::result::Result<(), TransportError> {
+        Ok(())
+    }
 }
 
 pub fn send_immediate(
@@ -237,6 +289,18 @@ pub fn send_immediate(
 
 pub fn send_config(transport: &mut impl SerialTransport, write: &ConfigWrite<'_>) -> Result<()> {
     let packet = protocol::encode_config_packet(write)?;
+    transport.write_config(&packet)?;
+    Ok(())
+}
+
+pub fn send_config_fetch(transport: &mut impl SerialTransport, fetch: &ConfigFetch) -> Result<()> {
+    let packet = protocol::encode_config_fetch_packet(fetch)?;
+    transport.write_config(&packet)?;
+    Ok(())
+}
+
+pub fn send_heartbeat(transport: &mut impl SerialTransport, heartbeat: &Heartbeat) -> Result<()> {
+    let packet = protocol::encode_heartbeat_packet(heartbeat)?;
     transport.write_config(&packet)?;
     Ok(())
 }

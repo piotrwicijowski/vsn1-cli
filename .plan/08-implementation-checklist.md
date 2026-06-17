@@ -13,12 +13,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 ## Session handoff state
 
 - Overall status: `in progress`
-- Last completed step: `step 5`
-- In-progress step: `step 6 - implement runtime inspection commands over the bundled manifest contract`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-12 after adding runtime_bundle.rs, hashed bundle assets, and the initial field inventory)`
-- Last hardware validation: `2026-06-17 on Linux host: cargo run -- device list discovered /dev/ttyACM0 (VID:PID 303a:8123); cargo run -- device info and cargo run -- device info --dx 0 --dy 0 both opened successfully at 2000000 baud; cargo run -- screen raw broadcast direct-draw, cargo run -- screen raw --dx 0 --dy 0 update_param(...), and cargo run -- screen raw --dx 0 --dy 0 direct-draw all produced visible screen changes; dx=0 dy=0 appears to be the working LCD target on this hardware`
-- Open blockers: `none for steps 3-5; step 6 software work is next`
-- Next session start point: `step 6 - wire runtime verify/status to the new bundled manifest contract`
+- Last completed step: `step 7`
+- In-progress step: `step 8 - curated screen field registry`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after aligning runtime install/verify with the real stored CONFIG representation returned by fetches, keeping bundled hashes on framed stored content, and preserving the bundle-size guard)`
+- Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; follow-up cargo run -- runtime verify --dx 0 --dy 0 and cargo run -- runtime status --dx 0 --dy 0 both also reported exact-match compatible on dx=0 dy=0`
+- Open blockers: `none for steps 6-7; next work is step 8 field registry implementation`
+- Next session start point: `implement step 8 by adding the curated screen field registry in screen.rs with field lookup, layer/value metadata, validation, and unit tests`
 
 ## Rules for every step
 
@@ -82,23 +82,23 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 6: Implement runtime inspection commands
 
-- [ ] Add `runtime.rs` read/verify/status primitives over owned slots.
-- [ ] Implement `runtime verify` and `runtime status`.
-- [ ] Fail on any missing, drifted, or mismatched owned content.
-- [ ] Keep exact bundled version matching as the only success condition.
-- [ ] Add unit tests for match, mismatch, missing-slot, and malformed-manifest cases.
-- [ ] Hardware gate: confirm verify catches both exact-match and drifted-runtime cases.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Add `runtime.rs` read/verify/status primitives over owned slots.
+- [x] Implement `runtime verify` and `runtime status`.
+- [x] Fail on any missing, drifted, or mismatched owned content.
+- [x] Keep exact bundled version matching as the only success condition.
+- [x] Add unit tests for match, mismatch, missing-slot, and malformed-manifest cases.
+- [x] Hardware gate: confirm verify catches both exact-match and drifted-runtime cases.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 7: Implement runtime install
 
-- [ ] Implement `runtime install` using the manifest install order.
-- [ ] Read back owned content and verify exact bundle match after install.
-- [ ] Keep writes limited to owned slots only.
-- [ ] Add clear diagnostics for install preconditions and failures.
-- [ ] Add unit tests for install planning, ordered writes, and post-install verification behavior.
-- [ ] Hardware gate: confirm install provisions a blank or repaired device successfully.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Implement `runtime install` using the manifest install order.
+- [x] Read back owned content and verify exact bundle match after install.
+- [x] Keep writes limited to owned slots only.
+- [x] Add clear diagnostics for install preconditions and failures.
+- [x] Add unit tests for install planning, ordered writes, and post-install verification behavior.
+- [x] Hardware gate: confirm install provisions a blank or repaired device successfully.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 8: Add the curated screen field registry
 
@@ -149,8 +149,8 @@ Update this section as work lands.
 - Step 3: `completed on 2026-06-17 - Linux host validation confirmed real-device discovery on /dev/ttyACM0, successful 2000000-baud transport open, and explicit dx=0 dy=0 targeting flow on hardware`
 - Step 4: `completed on 2026-06-17 - Linux host validation confirmed screen raw produces visible screen changes for both broadcast direct-draw and explicit dx=0 dy=0 raw update_param(...) and direct-draw commands`
 - Step 5: `completed on 2026-06-12 - added the first bundled runtime contract with hashed LCD init/draw assets, manifest loading, normalized hash verification, and an initial curated dotted field inventory derived from the validated POC slot ownership and update_param(...) payload shape`
-- Step 6: `not started`
-- Step 7: `not started`
+- Step 6: `completed on 2026-06-17 - software path added runtime.rs inspection, config-fetch verification, and CLI wiring; hardware validation on /dev/ttyACM0 at dx=0 dy=0 confirmed both drift detection before install and exact-match verification after bundled runtime install`
+- Step 7: `completed on 2026-06-17 - implemented runtime install with manifest-ordered owned-slot writes, owned-slot-only scope, post-install exact-match verification, CLI wiring, and step 7 unit tests; fixed the bundled lcd-init asset to fit the real Grid CONFIG payload limit, added bundle-size validation, corrected exact-match verification to compare against the framed stored CONFIG representation returned by fetches, and validated runtime install/verify/status on /dev/ttyACM0 at dx=0 dy=0`
 - Step 8: `not started`
 - Step 9: `not started`
 - Step 10: `not started`

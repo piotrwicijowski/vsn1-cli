@@ -2,6 +2,7 @@ pub mod device;
 mod error;
 pub mod protocol;
 pub mod raw;
+pub mod runtime;
 pub mod runtime_bundle;
 pub mod targeting;
 pub mod transport;
@@ -15,7 +16,11 @@ use crate::device::{
     discover_supported_devices, select_single_device, DeviceDiscovery, SystemDeviceDiscovery,
 };
 use crate::raw::send_screen_raw;
-use crate::targeting::resolve_target;
+use crate::runtime::{
+    inspect_bundled_runtime, install_bundled_runtime, verify_bundled_runtime,
+    RuntimeInspectionReport, RuntimeInstallReport, RuntimeSlotStatus, TransportRuntimeSlotReader,
+};
+use crate::targeting::{resolve_target, ResolvedTarget};
 use crate::transport::{SerialTransportFactory, SystemTransportFactory};
 
 pub use error::{Error, Result};
@@ -64,12 +69,30 @@ pub struct RuntimeArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum RuntimeCommand {
-    Install,
-    Verify,
-    Upgrade,
-    Repair,
-    Remove,
-    Status,
+    Install {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    Verify {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    Upgrade {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    Repair {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    Remove {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    Status {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
@@ -173,12 +196,12 @@ pub fn main() -> ExitCode {
 impl RuntimeCommand {
     fn name(&self) -> &'static str {
         match self {
-            RuntimeCommand::Install => "runtime install",
-            RuntimeCommand::Verify => "runtime verify",
-            RuntimeCommand::Upgrade => "runtime upgrade",
-            RuntimeCommand::Repair => "runtime repair",
-            RuntimeCommand::Remove => "runtime remove",
-            RuntimeCommand::Status => "runtime status",
+            RuntimeCommand::Install { .. } => "runtime install",
+            RuntimeCommand::Verify { .. } => "runtime verify",
+            RuntimeCommand::Upgrade { .. } => "runtime upgrade",
+            RuntimeCommand::Repair { .. } => "runtime repair",
+            RuntimeCommand::Remove { .. } => "runtime remove",
+            RuntimeCommand::Status { .. } => "runtime status",
         }
     }
 }
@@ -206,7 +229,18 @@ where
                 render_device_info(discovery, transport_factory, &target)
             }
         },
-        TopLevelCommand::Runtime(args) => Err(Error::unimplemented(args.command.name())),
+        TopLevelCommand::Runtime(args) => match args.command {
+            RuntimeCommand::Install { target } => {
+                execute_runtime_install(discovery, transport_factory, &target)
+            }
+            RuntimeCommand::Verify { target } => {
+                execute_runtime_verify(discovery, transport_factory, &target)
+            }
+            RuntimeCommand::Status { target } => {
+                execute_runtime_status(discovery, transport_factory, &target)
+            }
+            command => Err(Error::unimplemented(command.name())),
+        },
         TopLevelCommand::Screen(args) => match args.command {
             ScreenCommand::Raw { lua, target } => {
                 execute_screen_raw(discovery, transport_factory, &target, &lua)
@@ -277,6 +311,161 @@ where
     ))
 }
 
+fn execute_runtime_verify<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    let report = verify_bundled_runtime(target, &mut reader)?;
+
+    Ok(render_runtime_output(
+        &device.to_string(),
+        target,
+        &report,
+        true,
+    ))
+}
+
+fn execute_runtime_install<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    let report = install_bundled_runtime(target, &mut reader)?;
+
+    Ok(render_runtime_install_output(
+        &device.to_string(),
+        target,
+        &report,
+    ))
+}
+
+fn execute_runtime_status<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    let report = inspect_bundled_runtime(target, &mut reader)?;
+
+    Ok(render_runtime_output(
+        &device.to_string(),
+        target,
+        &report,
+        false,
+    ))
+}
+
+fn render_runtime_output(
+    device: &str,
+    requested_target: ResolvedTarget,
+    report: &RuntimeInspectionReport,
+    verified: bool,
+) -> String {
+    let mut output = format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nBundled runtime version: {}\nStatus: {}\n",
+        protocol::GRID_BAUD_RATE,
+        report.bundle_version(),
+        report.status_label(),
+    );
+
+    match report.observed_targets() {
+        [] => {}
+        [target] => {
+            output.push_str(&format!(
+                "Observed runtime target: dx={} dy={}\n",
+                target.dx, target.dy
+            ));
+        }
+        targets => {
+            let summary = targets
+                .iter()
+                .map(|target| format!("dx={} dy={}", target.dx, target.dy))
+                .collect::<Vec<_>>()
+                .join(", ");
+            output.push_str(&format!("Observed runtime targets: {summary}\n"));
+        }
+    }
+
+    for inspection in report.slot_inspections() {
+        let detail = match &inspection.status {
+            RuntimeSlotStatus::Match { source_target } => {
+                format!("match on dx={} dy={}", source_target.dx, source_target.dy)
+            }
+            RuntimeSlotStatus::Missing => "missing or blank".to_string(),
+            RuntimeSlotStatus::Drifted {
+                actual_sha256,
+                source_target,
+            } => format!(
+                "hash mismatch on dx={} dy={} (expected {}, got {})",
+                source_target.dx,
+                source_target.dy,
+                inspection.slot.normalized_sha256,
+                actual_sha256
+            ),
+            RuntimeSlotStatus::WrongTarget { actual_target } => format!(
+                "responded from dx={} dy={} instead of the requested target",
+                actual_target.dx, actual_target.dy
+            ),
+        };
+
+        output.push_str(&format!(
+            "- {} ({}): {}\n",
+            inspection.slot.name,
+            inspection.slot.location_display(),
+            detail
+        ));
+    }
+
+    if verified {
+        output.push_str("Verification: exact bundled runtime match confirmed.\n");
+    }
+
+    output
+}
+
+fn render_runtime_install_output(
+    device: &str,
+    requested_target: ResolvedTarget,
+    report: &RuntimeInstallReport,
+) -> String {
+    let mut output =
+        render_runtime_output(device, requested_target, report.verification_report(), true);
+
+    output.push_str("Installed owned slots in manifest order:\n");
+    for slot in report.installed_slots() {
+        output.push_str(&format!("- {} ({})\n", slot.name, slot.location_display()));
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +490,18 @@ mod tests {
 
         fn write_config(&mut self, _packet: &[u8]) -> std::result::Result<(), TransportError> {
             panic!("screen raw should not use config writes")
+        }
+
+        fn bytes_to_read(&self) -> std::result::Result<u32, TransportError> {
+            Ok(0)
+        }
+
+        fn read(&mut self, _buffer: &mut [u8]) -> std::result::Result<usize, TransportError> {
+            Ok(0)
+        }
+
+        fn clear_input(&mut self) -> std::result::Result<(), TransportError> {
+            Ok(())
         }
     }
 
@@ -400,7 +601,9 @@ mod tests {
             cli,
             Cli {
                 command: TopLevelCommand::Runtime(RuntimeArgs {
-                    command: RuntimeCommand::Verify,
+                    command: RuntimeCommand::Verify {
+                        target: TargetArgs::default(),
+                    },
                 }),
             }
         );
@@ -546,7 +749,9 @@ mod tests {
         let error = execute_cli(
             Cli {
                 command: TopLevelCommand::Runtime(RuntimeArgs {
-                    command: RuntimeCommand::Verify,
+                    command: RuntimeCommand::Upgrade {
+                        target: TargetArgs::default(),
+                    },
                 }),
             },
             &StaticDiscovery {
@@ -557,7 +762,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.to_string(), "runtime verify is not implemented yet");
+        assert_eq!(error.to_string(), "runtime upgrade is not implemented yet");
     }
 
     #[test]
