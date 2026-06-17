@@ -2,6 +2,7 @@ pub mod device;
 mod error;
 pub mod protocol;
 pub mod raw;
+pub mod runtime_bundle;
 pub mod targeting;
 pub mod transport;
 

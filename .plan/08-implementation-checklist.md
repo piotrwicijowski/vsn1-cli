@@ -13,12 +13,12 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 ## Session handoff state
 
 - Overall status: `in progress`
-- Last completed step: `step 2`
-- In-progress step: `step 4 - ship the first end-to-end screen path with screen raw`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-12 after wiring screen raw through the immediate path)
-- Last hardware validation: `step 3 attempted on 2026-06-12: cargo run -- device list now correctly reports no supported devices in this container after filtering out enumerated-but-missing /dev paths; step 4 hardware validation not run yet because this container still lacks direct access to the real /dev/ttyACM* node`
+- Last completed step: `step 5`
+- In-progress step: `step 6 - implement runtime inspection commands over the bundled manifest contract`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-12 after adding runtime_bundle.rs, hashed bundle assets, and the initial field inventory)`
+- Last hardware validation: `step 3 attempted on 2026-06-12: cargo run -- device list now correctly reports no supported devices in this container after filtering out enumerated-but-missing /dev paths; step 4 hardware validation still not run because this container lacks direct access to the real /dev/ttyACM* node`
 - Open blockers: `step 3 real-device validation still required for discovered topology and explicit targeting; step 4 real-device validation still required to confirm screen raw changes the screen on hardware`
-- Next session start point: `step 4 - run hardware validation for screen raw on the host with direct serial-device access, then close the remaining hardware gate and revisit step 3 host validation if needed`
+- Next session start point: `step 6 - wire runtime verify/status to the new bundled manifest contract, while keeping step 3 and step 4 host-side hardware validation pending on a machine with direct serial-device access`
 
 ## Rules for every step
 
@@ -72,13 +72,13 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 5: Define the runtime bundle contract
 
-- [ ] Create `assets/runtime/<bundle-version>/` and add a manifest file.
-- [ ] Define owned script/config locations, install order, and exact-match identity fields.
-- [ ] Add `runtime_bundle.rs` for manifest loading, normalization, and content hashing.
-- [ ] Capture the first bundled runtime/profile asset set from the validated POC inputs.
-- [ ] Record the initial curated dotted field inventory that the runtime will support.
-- [ ] Add unit tests for manifest parsing, content normalization, and hash comparison.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Create `assets/runtime/<bundle-version>/` and add a manifest file.
+- [x] Define owned script/config locations, install order, and exact-match identity fields.
+- [x] Add `runtime_bundle.rs` for manifest loading, normalization, and content hashing.
+- [x] Capture the first bundled runtime/profile asset set from the validated POC inputs.
+- [x] Record the initial curated dotted field inventory that the runtime will support.
+- [x] Add unit tests for manifest parsing, content normalization, and hash comparison.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 6: Implement runtime inspection commands
 
@@ -148,7 +148,7 @@ Update this section as work lands.
 - Step 2: `completed on 2026-06-12`
 - Step 3: `in progress - software complete, discovery hardened against missing device nodes, hardware validation still pending on a host runtime with direct serial access`
 - Step 4: `in progress - software complete, hardware validation pending on a host runtime with direct serial access`
-- Step 5: `not started`
+- Step 5: `completed on 2026-06-12 - added the first bundled runtime contract with hashed LCD init/draw assets, manifest loading, normalized hash verification, and an initial curated dotted field inventory derived from the validated POC slot ownership and update_param(...) payload shape`
 - Step 6: `not started`
 - Step 7: `not started`
 - Step 8: `not started`
