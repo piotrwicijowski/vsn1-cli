@@ -16,9 +16,9 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 - Last completed step: `step 5`
 - In-progress step: `step 6 - implement runtime inspection commands over the bundled manifest contract`
 - Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-12 after adding runtime_bundle.rs, hashed bundle assets, and the initial field inventory)`
-- Last hardware validation: `step 3 attempted on 2026-06-12: cargo run -- device list now correctly reports no supported devices in this container after filtering out enumerated-but-missing /dev paths; step 4 hardware validation still not run because this container lacks direct access to the real /dev/ttyACM* node`
-- Open blockers: `step 3 real-device validation still required for discovered topology and explicit targeting; step 4 real-device validation still required to confirm screen raw changes the screen on hardware`
-- Next session start point: `step 6 - wire runtime verify/status to the new bundled manifest contract, while keeping step 3 and step 4 host-side hardware validation pending on a machine with direct serial-device access`
+- Last hardware validation: `2026-06-17 on Linux host: cargo run -- device list discovered /dev/ttyACM0 (VID:PID 303a:8123); cargo run -- device info and cargo run -- device info --dx 0 --dy 0 both opened successfully at 2000000 baud; cargo run -- screen raw broadcast direct-draw, cargo run -- screen raw --dx 0 --dy 0 update_param(...), and cargo run -- screen raw --dx 0 --dy 0 direct-draw all produced visible screen changes; dx=0 dy=0 appears to be the working LCD target on this hardware`
+- Open blockers: `none for steps 3-5; step 6 software work is next`
+- Next session start point: `step 6 - wire runtime verify/status to the new bundled manifest contract`
 
 ## Rules for every step
 
@@ -58,7 +58,7 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 - [x] Support broadcast-first defaults plus explicit `--dx` and `--dy` overrides.
 - [x] Implement `device list` and `device info` using the transport abstraction.
 - [x] Add unit tests for targeting resolution, ambiguous-target failures, and CLI parsing.
-- [ ] Hardware gate: confirm discovered topology and explicit targeting on a real device.
+- [x] Hardware gate: confirm discovered topology and explicit targeting on a real device.
 - [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 4: Ship the first end-to-end screen path with `screen raw`
@@ -67,7 +67,7 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 - [x] Send raw framed Lua through the immediate path.
 - [x] Reuse the same diagnostics and targeting behavior as other screen commands.
 - [x] Add unit tests for raw command parsing, payload framing, and error reporting.
-- [ ] Hardware gate: confirm `screen raw` changes the screen on a real device.
+- [x] Hardware gate: confirm `screen raw` changes the screen on a real device.
 - [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 5: Define the runtime bundle contract
@@ -146,8 +146,8 @@ Update this section as work lands.
 
 - Step 1: `completed on 2026-06-12`
 - Step 2: `completed on 2026-06-12`
-- Step 3: `in progress - software complete, discovery hardened against missing device nodes, hardware validation still pending on a host runtime with direct serial access`
-- Step 4: `in progress - software complete, hardware validation pending on a host runtime with direct serial access`
+- Step 3: `completed on 2026-06-17 - Linux host validation confirmed real-device discovery on /dev/ttyACM0, successful 2000000-baud transport open, and explicit dx=0 dy=0 targeting flow on hardware`
+- Step 4: `completed on 2026-06-17 - Linux host validation confirmed screen raw produces visible screen changes for both broadcast direct-draw and explicit dx=0 dy=0 raw update_param(...) and direct-draw commands`
 - Step 5: `completed on 2026-06-12 - added the first bundled runtime contract with hashed LCD init/draw assets, manifest loading, normalized hash verification, and an initial curated dotted field inventory derived from the validated POC slot ownership and update_param(...) payload shape`
 - Step 6: `not started`
 - Step 7: `not started`
