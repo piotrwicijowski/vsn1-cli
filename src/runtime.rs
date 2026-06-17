@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::fmt;
 use std::path::Path;
@@ -66,6 +67,10 @@ pub trait RuntimePageStorer {
     fn store_page(&mut self, target: ResolvedTarget, page: u8) -> Result<()>;
 }
 
+pub trait RuntimeSlotClearer {
+    fn clear_owned_slot(&mut self, target: ResolvedTarget, slot: &OwnedRuntimeSlot) -> Result<()>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSlotStatus {
     Match {
@@ -99,6 +104,25 @@ pub struct RuntimeInspectionReport {
 pub struct RuntimeInstallReport {
     installed_slots: Vec<OwnedRuntimeSlot>,
     verification_report: RuntimeInspectionReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUpgradeReport {
+    previous_bundle_version: String,
+    install_report: RuntimeInstallReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRemoveReport {
+    removed_slots: Vec<OwnedRuntimeSlot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeLifecycleState {
+    ExactCurrent,
+    ExactOlder { bundle_version: String },
+    Missing,
+    DriftedOrIncomplete,
 }
 
 pub struct TransportRuntimeSlotReader<T> {
@@ -283,6 +307,22 @@ impl RuntimeInstallReport {
     }
 }
 
+impl RuntimeUpgradeReport {
+    pub fn previous_bundle_version(&self) -> &str {
+        &self.previous_bundle_version
+    }
+
+    pub fn install_report(&self) -> &RuntimeInstallReport {
+        &self.install_report
+    }
+}
+
+impl RuntimeRemoveReport {
+    pub fn removed_slots(&self) -> &[OwnedRuntimeSlot] {
+        &self.removed_slots
+    }
+}
+
 impl<T> TransportRuntimeSlotReader<T>
 where
     T: SerialTransport,
@@ -404,6 +444,26 @@ where
     }
 }
 
+impl<T> RuntimeSlotClearer for TransportRuntimeSlotReader<T>
+where
+    T: SerialTransport,
+{
+    fn clear_owned_slot(&mut self, target: ResolvedTarget, slot: &OwnedRuntimeSlot) -> Result<()> {
+        self.transport.clear_input()?;
+
+        let packet = protocol::encode_config_packet(&ConfigWrite {
+            target: target.grid_target(),
+            location: ConfigLocation::new(slot.page, slot.element, slot.event),
+            lua: "",
+            identity: self.next_identity(),
+        })?;
+        self.transport.write_config(&packet)?;
+        thread::sleep(CONFIG_WRITE_SETTLE_DELAY);
+
+        Ok(())
+    }
+}
+
 pub fn inspect_bundled_runtime<R>(
     requested_target: ResolvedTarget,
     reader: &mut R,
@@ -488,6 +548,111 @@ where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
 {
     let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
+    install_runtime_bundle(&bundle, requested_target, reader)
+}
+
+pub fn upgrade_bundled_runtime<R>(
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeUpgradeReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
+    let current_bundle = RuntimeBundle::bundled()?;
+
+    match classify_runtime_lifecycle_state(&current_bundle, requested_target, reader)? {
+        RuntimeLifecycleState::ExactCurrent => Err(RuntimeError::verification_failed(format!(
+            "bundled runtime {} is already installed exactly; runtime upgrade only applies to older managed bundle versions",
+            current_bundle.manifest().bundle_version
+        ))),
+        RuntimeLifecycleState::ExactOlder { bundle_version } => {
+            let install_report = install_runtime_bundle(&current_bundle, requested_target, reader)?;
+            Ok(RuntimeUpgradeReport {
+                previous_bundle_version: bundle_version,
+                install_report,
+            })
+        }
+        RuntimeLifecycleState::Missing => Err(RuntimeError::verification_failed(
+            "no managed bundled runtime content was detected in the owned slots; use `runtime install` for a fresh provision",
+        )),
+        RuntimeLifecycleState::DriftedOrIncomplete => Err(RuntimeError::verification_failed(
+            "the owned slots do not match an exact older bundled runtime; use `runtime repair` for drifted or partial managed content",
+        )),
+    }
+}
+
+pub fn repair_bundled_runtime<R>(
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeInstallReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
+    let current_bundle = RuntimeBundle::bundled()?;
+
+    match classify_runtime_lifecycle_state(&current_bundle, requested_target, reader)? {
+        RuntimeLifecycleState::ExactCurrent => Err(RuntimeError::verification_failed(format!(
+            "bundled runtime {} is already installed exactly; runtime repair is only for drifted or partial managed content",
+            current_bundle.manifest().bundle_version
+        ))),
+        RuntimeLifecycleState::ExactOlder { bundle_version } => {
+            Err(RuntimeError::verification_failed(format!(
+                "managed slots match older bundled runtime {bundle_version} exactly; use `runtime upgrade` instead of `runtime repair`"
+            )))
+        }
+        RuntimeLifecycleState::Missing => Err(RuntimeError::verification_failed(
+            "no managed bundled runtime content was detected in the owned slots; use `runtime install` for a fresh provision",
+        )),
+        RuntimeLifecycleState::DriftedOrIncomplete => {
+            install_runtime_bundle(&current_bundle, requested_target, reader)
+        }
+    }
+}
+
+pub fn remove_bundled_runtime<R>(
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeRemoveReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer,
+{
+    let bundle = RuntimeBundle::bundled()?;
+    let managed_hashes = managed_slot_hashes_for_bundle(&bundle)?;
+    let removable_slots = plan_runtime_remove(&bundle, &managed_hashes, requested_target, reader)?;
+
+    if removable_slots.is_empty() {
+        return Err(RuntimeError::verification_failed(
+            "no managed bundled runtime content was present in the owned slots; nothing was removed",
+        ));
+    }
+
+    let mut stored_pages = Vec::new();
+    for slot in &removable_slots {
+        if !stored_pages.contains(&slot.page) {
+            stored_pages.push(slot.page);
+        }
+        reader.clear_owned_slot(requested_target, slot)?;
+    }
+
+    for page in stored_pages {
+        reader.store_page(requested_target, page)?;
+    }
+
+    verify_removed_slots(requested_target, &removable_slots, reader)?;
+
+    Ok(RuntimeRemoveReport {
+        removed_slots: removable_slots,
+    })
+}
+
+fn install_runtime_bundle<R>(
+    bundle: &RuntimeBundle,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeInstallReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
     let mut stored_pages = Vec::new();
 
     for asset in bundle.assets() {
@@ -518,6 +683,191 @@ where
             .collect(),
         verification_report,
     })
+}
+
+fn classify_runtime_lifecycle_state<R>(
+    current_bundle: &RuntimeBundle,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeLifecycleState>
+where
+    R: RuntimeSlotReader,
+{
+    let current_report = inspect_runtime_bundle(current_bundle, requested_target, reader)?;
+    if current_report.is_exact_match() {
+        return Ok(RuntimeLifecycleState::ExactCurrent);
+    }
+
+    if current_report
+        .slot_inspections()
+        .iter()
+        .all(|inspection| matches!(inspection.status, RuntimeSlotStatus::Missing))
+    {
+        return Ok(RuntimeLifecycleState::Missing);
+    }
+
+    for bundle in RuntimeBundle::load_bundled_family()? {
+        if bundle.manifest().bundle_version == current_bundle.manifest().bundle_version {
+            continue;
+        }
+
+        if inspect_runtime_bundle(&bundle, requested_target, reader)?.is_exact_match() {
+            return Ok(RuntimeLifecycleState::ExactOlder {
+                bundle_version: bundle.manifest().bundle_version.clone(),
+            });
+        }
+    }
+
+    Ok(RuntimeLifecycleState::DriftedOrIncomplete)
+}
+
+fn managed_slot_hashes_for_bundle(bundle: &RuntimeBundle) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut managed_hashes = bundle
+        .assets()
+        .iter()
+        .map(|asset| (asset.slot.name.clone(), (asset.slot.clone(), Vec::new())))
+        .collect::<BTreeMap<_, _>>();
+
+    for historical_bundle in RuntimeBundle::load_bundled_family()? {
+        let mut seen_slots = Vec::new();
+
+        for asset in historical_bundle.assets() {
+            let Some((expected_slot, known_hashes)) = managed_hashes.get_mut(&asset.slot.name)
+            else {
+                return Err(RuntimeError::verification_failed(format!(
+                    "historical bundled runtime {} includes unexpected owned slot {}",
+                    historical_bundle.manifest().bundle_version,
+                    asset.slot.name
+                )));
+            };
+
+            if expected_slot.page != asset.slot.page
+                || expected_slot.element != asset.slot.element
+                || expected_slot.event != asset.slot.event
+            {
+                return Err(RuntimeError::verification_failed(format!(
+                    "historical bundled runtime {} changed the owned location for {}",
+                    historical_bundle.manifest().bundle_version,
+                    asset.slot.name
+                )));
+            }
+
+            seen_slots.push(asset.slot.name.clone());
+            if !known_hashes.contains(&asset.normalized_sha256) {
+                known_hashes.push(asset.normalized_sha256.clone());
+            }
+        }
+
+        for expected_name in managed_hashes.keys() {
+            if !seen_slots
+                .iter()
+                .any(|seen_name| seen_name == expected_name)
+            {
+                return Err(RuntimeError::verification_failed(format!(
+                    "historical bundled runtime {} is missing owned slot {}",
+                    historical_bundle.manifest().bundle_version,
+                    expected_name
+                )));
+            }
+        }
+    }
+
+    Ok(managed_hashes
+        .into_iter()
+        .map(|(name, (_slot, hashes))| (name, hashes))
+        .collect())
+}
+
+fn plan_runtime_remove<R>(
+    bundle: &RuntimeBundle,
+    managed_hashes: &BTreeMap<String, Vec<String>>,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<Vec<OwnedRuntimeSlot>>
+where
+    R: RuntimeSlotReader,
+{
+    let mut removable_slots = Vec::new();
+
+    for asset in bundle.assets() {
+        let Some(read) = reader.read_owned_slot(requested_target, &asset.slot)? else {
+            continue;
+        };
+
+        if let ResolvedTarget::Explicit(expected_target) = requested_target {
+            if read.source_target != expected_target {
+                return Err(RuntimeError::verification_failed(format!(
+                    "refusing to remove {} at {} because it responded from dx={} dy={} instead of the requested target",
+                    asset.slot.name,
+                    asset.slot.location_display(),
+                    read.source_target.dx,
+                    read.source_target.dy
+                )));
+            }
+        }
+
+        let actual_sha256 = normalized_sha256(&read.content);
+        let Some(known_hashes) = managed_hashes.get(&asset.slot.name) else {
+            return Err(RuntimeError::verification_failed(format!(
+                "no managed hash inventory was loaded for owned slot {}",
+                asset.slot.name
+            )));
+        };
+
+        if known_hashes.contains(&actual_sha256) {
+            removable_slots.push(asset.slot.clone());
+            continue;
+        }
+
+        return Err(RuntimeError::verification_failed(format!(
+            "refusing to remove {} at {} because its current content does not match any bundled managed runtime version",
+            asset.slot.name,
+            asset.slot.location_display()
+        )));
+    }
+
+    Ok(removable_slots)
+}
+
+fn verify_removed_slots<R>(
+    requested_target: ResolvedTarget,
+    removed_slots: &[OwnedRuntimeSlot],
+    reader: &mut R,
+) -> Result<()>
+where
+    R: RuntimeSlotReader,
+{
+    let cleared_slot_sha256 = normalized_sha256(&protocol::frame_lua(""));
+
+    for slot in removed_slots {
+        if let Some(read) = reader.read_owned_slot(requested_target, slot)? {
+            if let ResolvedTarget::Explicit(expected_target) = requested_target {
+                if read.source_target != expected_target {
+                    return Err(RuntimeError::verification_failed(format!(
+                        "post-remove owned slot {} at {} responded from dx={} dy={} instead of the requested target",
+                        slot.name,
+                        slot.location_display(),
+                        read.source_target.dx,
+                        read.source_target.dy
+                    )));
+                }
+            }
+
+            if normalized_sha256(&read.content) == cleared_slot_sha256 {
+                continue;
+            }
+
+            return Err(RuntimeError::verification_failed(format!(
+                "post-remove owned slot {} at {} still contains content on dx={} dy={}",
+                slot.name,
+                slot.location_display(),
+                read.source_target.dx,
+                read.source_target.dy
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn inspect_runtime_bundle<R>(
@@ -874,6 +1224,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSlotAccessor {
         writes: Vec<String>,
+        clears: Vec<String>,
         stored_pages: Vec<u8>,
         slots: BTreeMap<String, RuntimeSlotRead>,
         persist_writes: bool,
@@ -888,6 +1239,10 @@ mod tests {
 
         fn stored_pages(&self) -> &[u8] {
             &self.stored_pages
+        }
+
+        fn clear_order(&self) -> &[String] {
+            &self.clears
         }
     }
 
@@ -943,6 +1298,24 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+    }
+
+    impl RuntimeSlotClearer for RecordingSlotAccessor {
+        fn clear_owned_slot(
+            &mut self,
+            _target: ResolvedTarget,
+            slot: &OwnedRuntimeSlot,
+        ) -> Result<()> {
+            self.clears.push(slot.name.clone());
+            self.slots.insert(
+                slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content: normalize_text_content(&frame_lua("")),
+                },
+            );
+            Ok(())
         }
     }
 
@@ -1157,5 +1530,167 @@ runtime_marker = "fixture:first"
         assert!(error
             .to_string()
             .contains("lcd-draw at page=0 element=13 event=8 drifted"));
+    }
+
+    #[test]
+    fn upgrade_reinstalls_current_bundle_when_an_older_bundled_version_matches_exactly() {
+        let current_bundle = RuntimeBundle::bundled().unwrap();
+        let older_bundle = RuntimeBundle::load_from_dir(
+            crate::runtime_bundle::bundled_runtime_root_dir().join("2026-06-17-screen-first.7"),
+        )
+        .unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        for asset in older_bundle.assets() {
+            accessor.slots.insert(
+                asset.slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content: asset.stored_content.clone(),
+                },
+            );
+        }
+
+        let report = upgrade_bundled_runtime(
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.previous_bundle_version(),
+            "2026-06-17-screen-first.7"
+        );
+        assert_eq!(
+            accessor.write_order(),
+            &current_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(accessor.stored_pages(), &[0]);
+        assert!(report
+            .install_report()
+            .verification_report()
+            .is_exact_match());
+    }
+
+    #[test]
+    fn repair_reinstalls_current_bundle_when_owned_slots_are_drifted_or_missing() {
+        let bundle = RuntimeBundle::bundled().unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        for asset in bundle.assets() {
+            let content = if asset.slot.name == "lcd-init" {
+                normalize_text_content(&frame_lua("return 'drifted'\n"))
+            } else {
+                String::new()
+            };
+
+            if !content.is_empty() {
+                accessor.slots.insert(
+                    asset.slot.name.clone(),
+                    RuntimeSlotRead {
+                        source_target: GridTarget::new(0, 0),
+                        content,
+                    },
+                );
+            }
+        }
+
+        let report = repair_bundled_runtime(
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            accessor.write_order(),
+            &bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(accessor.stored_pages(), &[0]);
+        assert!(report.verification_report().is_exact_match());
+    }
+
+    #[test]
+    fn remove_clears_owned_slots_when_they_match_a_managed_bundle_version() {
+        let bundle = RuntimeBundle::bundled().unwrap();
+        let mut accessor = RecordingSlotAccessor::default();
+
+        for asset in bundle.assets() {
+            accessor.slots.insert(
+                asset.slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content: asset.stored_content.clone(),
+                },
+            );
+        }
+
+        let report = remove_bundled_runtime(
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            accessor.clear_order(),
+            &bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(accessor.stored_pages(), &[0]);
+        assert_eq!(report.removed_slots().len(), bundle.assets().len());
+        assert!(accessor
+            .slots
+            .values()
+            .all(|slot| normalized_sha256(&slot.content) == normalized_sha256(&frame_lua(""))));
+    }
+
+    #[test]
+    fn remove_refuses_to_clear_unmanaged_slot_content() {
+        let bundle = RuntimeBundle::bundled().unwrap();
+        let mut accessor = RecordingSlotAccessor::default();
+
+        for asset in bundle.assets() {
+            let content = if asset.slot.name == "lcd-draw" {
+                normalize_text_content(&frame_lua("return 'user script'\n"))
+            } else {
+                asset.stored_content.clone()
+            };
+
+            accessor.slots.insert(
+                asset.slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content,
+                },
+            );
+        }
+
+        let error = remove_bundled_runtime(
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains(
+            "refusing to remove lcd-draw at page=0 element=13 event=8 because its current content does not match any bundled managed runtime version"
+        ));
+        assert!(accessor.clear_order().is_empty());
+        assert!(accessor.stored_pages().is_empty());
     }
 }

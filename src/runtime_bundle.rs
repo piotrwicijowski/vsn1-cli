@@ -20,6 +20,10 @@ pub enum RuntimeBundleError {
         path: PathBuf,
         message: String,
     },
+    ReadBundleRoot {
+        path: PathBuf,
+        message: String,
+    },
     ParseManifest {
         path: PathBuf,
         message: String,
@@ -98,6 +102,13 @@ impl fmt::Display for RuntimeBundleError {
                     path.display()
                 )
             }
+            Self::ReadBundleRoot { path, message } => {
+                write!(
+                    f,
+                    "failed to read runtime bundle directory {}: {message}",
+                    path.display()
+                )
+            }
             Self::ParseManifest { path, message } => {
                 write!(
                     f,
@@ -130,6 +141,35 @@ impl StdError for RuntimeBundleError {}
 impl RuntimeBundle {
     pub fn bundled() -> Result<Self> {
         Self::load_from_dir(bundled_runtime_dir())
+    }
+
+    pub fn load_bundled_family() -> Result<Vec<Self>> {
+        let root = bundled_runtime_root_dir();
+        let entries = fs::read_dir(&root).map_err(|error| RuntimeBundleError::ReadBundleRoot {
+            path: root.clone(),
+            message: error.to_string(),
+        })?;
+        let mut bundles = Vec::new();
+
+        for entry in entries {
+            let entry = entry.map_err(|error| RuntimeBundleError::ReadBundleRoot {
+                path: root.clone(),
+                message: error.to_string(),
+            })?;
+            let path = entry.path();
+            if !path.is_dir() || !path.join(MANIFEST_FILE_NAME).is_file() {
+                continue;
+            }
+
+            bundles.push(Self::load_from_dir(path)?);
+        }
+
+        bundles.sort_by(|left, right| {
+            left.manifest
+                .bundle_version
+                .cmp(&right.manifest.bundle_version)
+        });
+        Ok(bundles)
     }
 
     pub fn load_from_dir(path: impl AsRef<Path>) -> Result<Self> {
@@ -189,9 +229,11 @@ impl OwnedRuntimeSlot {
 pub type Result<T> = std::result::Result<T, RuntimeBundleError>;
 
 pub fn bundled_runtime_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(BUNDLED_RUNTIME_ROOT)
-        .join(BUNDLED_RUNTIME_VERSION)
+    bundled_runtime_root_dir().join(BUNDLED_RUNTIME_VERSION)
+}
+
+pub fn bundled_runtime_root_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLED_RUNTIME_ROOT)
 }
 
 pub fn normalize_text_content(content: &str) -> String {

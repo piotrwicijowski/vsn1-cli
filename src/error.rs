@@ -13,7 +13,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    Unimplemented { command: &'static str },
     Device(DeviceError),
     Protocol(ProtocolError),
     Runtime(RuntimeError),
@@ -23,16 +22,9 @@ pub enum Error {
     Transport(TransportError),
 }
 
-impl Error {
-    pub fn unimplemented(command: &'static str) -> Self {
-        Self::Unimplemented { command }
-    }
-}
-
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unimplemented { command } => write!(f, "{command} is not implemented yet"),
             Self::Device(error) => error.fmt(f),
             Self::Protocol(error) => error.fmt(f),
             Self::Runtime(error) => error.fmt(f),
@@ -47,7 +39,6 @@ impl fmt::Display for Error {
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Self::Unimplemented { .. } => None,
             Self::Device(error) => Some(error),
             Self::Protocol(error) => Some(error),
             Self::Runtime(error) => Some(error),

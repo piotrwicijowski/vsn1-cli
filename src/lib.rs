@@ -18,8 +18,10 @@ use crate::device::{
 };
 use crate::raw::send_screen_raw;
 use crate::runtime::{
-    inspect_bundled_runtime, install_bundled_runtime, verify_bundled_runtime,
-    RuntimeInspectionReport, RuntimeInstallReport, RuntimeSlotStatus, TransportRuntimeSlotReader,
+    inspect_bundled_runtime, install_bundled_runtime, remove_bundled_runtime,
+    repair_bundled_runtime, upgrade_bundled_runtime, verify_bundled_runtime,
+    RuntimeInspectionReport, RuntimeInstallReport, RuntimeRemoveReport, RuntimeSlotStatus,
+    RuntimeUpgradeReport, TransportRuntimeSlotReader,
 };
 use crate::screen::{
     compile_activate_lua, compile_clear_lua, compile_set_lua, ScreenFieldRegistry,
@@ -198,19 +200,6 @@ pub fn main() -> ExitCode {
     }
 }
 
-impl RuntimeCommand {
-    fn name(&self) -> &'static str {
-        match self {
-            RuntimeCommand::Install { .. } => "runtime install",
-            RuntimeCommand::Verify { .. } => "runtime verify",
-            RuntimeCommand::Upgrade { .. } => "runtime upgrade",
-            RuntimeCommand::Repair { .. } => "runtime repair",
-            RuntimeCommand::Remove { .. } => "runtime remove",
-            RuntimeCommand::Status { .. } => "runtime status",
-        }
-    }
-}
-
 fn execute_cli<D, F>(cli: Cli, discovery: &D, transport_factory: &mut F) -> Result<String>
 where
     D: DeviceDiscovery,
@@ -230,10 +219,18 @@ where
             RuntimeCommand::Verify { target } => {
                 execute_runtime_verify(discovery, transport_factory, &target)
             }
+            RuntimeCommand::Upgrade { target } => {
+                execute_runtime_upgrade(discovery, transport_factory, &target)
+            }
+            RuntimeCommand::Repair { target } => {
+                execute_runtime_repair(discovery, transport_factory, &target)
+            }
+            RuntimeCommand::Remove { target } => {
+                execute_runtime_remove(discovery, transport_factory, &target)
+            }
             RuntimeCommand::Status { target } => {
                 execute_runtime_status(discovery, transport_factory, &target)
             }
-            command => Err(Error::unimplemented(command.name())),
         },
         TopLevelCommand::Screen(args) => match args.command {
             ScreenCommand::Set {
@@ -494,6 +491,75 @@ where
     ))
 }
 
+fn execute_runtime_upgrade<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    let report = upgrade_bundled_runtime(target, &mut reader)?;
+
+    Ok(render_runtime_upgrade_output(
+        &device.to_string(),
+        target,
+        &report,
+    ))
+}
+
+fn execute_runtime_repair<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    let report = repair_bundled_runtime(target, &mut reader)?;
+
+    Ok(render_runtime_repair_output(
+        &device.to_string(),
+        target,
+        &report,
+    ))
+}
+
+fn execute_runtime_remove<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    let report = remove_bundled_runtime(target, &mut reader)?;
+
+    Ok(render_runtime_remove_output(
+        &device.to_string(),
+        target,
+        &report,
+    ))
+}
+
 fn render_runtime_output(
     device: &str,
     requested_target: ResolvedTarget,
@@ -587,6 +653,49 @@ fn render_runtime_install_output(
 
     output.push_str("Installed owned slots in manifest order:\n");
     for slot in report.installed_slots() {
+        output.push_str(&format!("- {} ({})\n", slot.name, slot.location_display()));
+    }
+
+    output
+}
+
+fn render_runtime_upgrade_output(
+    device: &str,
+    requested_target: ResolvedTarget,
+    report: &RuntimeUpgradeReport,
+) -> String {
+    let mut output =
+        render_runtime_install_output(device, requested_target, report.install_report());
+    output.push_str(&format!(
+        "Upgrade source bundled version: {}\n",
+        report.previous_bundle_version()
+    ));
+    output
+}
+
+fn render_runtime_repair_output(
+    device: &str,
+    requested_target: ResolvedTarget,
+    report: &RuntimeInstallReport,
+) -> String {
+    let mut output = render_runtime_install_output(device, requested_target, report);
+    output.push_str("Repair: reapplied the bundled runtime to the owned slots.\n");
+    output
+}
+
+fn render_runtime_remove_output(
+    device: &str,
+    requested_target: ResolvedTarget,
+    report: &RuntimeRemoveReport,
+) -> String {
+    let mut output = format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nBundled runtime version: {}\nRuntime removal: cleared managed owned slots and committed the affected pages.\n",
+        protocol::GRID_BAUD_RATE,
+        crate::runtime_bundle::BUNDLED_RUNTIME_VERSION,
+    );
+
+    output.push_str("Removed owned slots in manifest order:\n");
+    for slot in report.removed_slots() {
         output.push_str(&format!("- {} ({})\n", slot.name, slot.location_display()));
     }
 
@@ -991,24 +1100,23 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_stub_error_for_unimplemented_command() {
-        let error = execute_cli(
+    fn parses_runtime_remove_with_explicit_target() {
+        let cli =
+            try_parse_from(["vsn1-cli", "runtime", "remove", "--dx", "0", "--dy", "0"]).unwrap();
+
+        assert_eq!(
+            cli,
             Cli {
                 command: TopLevelCommand::Runtime(RuntimeArgs {
-                    command: RuntimeCommand::Upgrade {
-                        target: TargetArgs::default(),
+                    command: RuntimeCommand::Remove {
+                        target: TargetArgs {
+                            dx: Some(0),
+                            dy: Some(0),
+                        },
                     },
                 }),
-            },
-            &StaticDiscovery {
-                devices: Vec::new(),
-                error: None,
-            },
-            &mut FakeTransportFactory::default(),
-        )
-        .unwrap_err();
-
-        assert_eq!(error.to_string(), "runtime upgrade is not implemented yet");
+            }
+        );
     }
 
     #[test]

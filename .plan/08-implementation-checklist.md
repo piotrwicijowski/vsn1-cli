@@ -15,10 +15,10 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 - Overall status: `in progress`
 - Last completed step: `step 9`
 - In-progress step: `step 10`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after fixing the temporary-layer regression introduced in bundled runtime 2026-06-17-screen-first.6, then simplifying the slow-layer visual in bundled runtime 2026-06-17-screen-first.8 to remove the white panel/black bar artifact while staying under the Grid CONFIG payload limit)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-17 after implementing runtime upgrade, repair, and remove with explicit managed-slot safety checks, managed-hash-based remove gating, and zero-length CONFIG clears for owned-slot removal)`
 - Last hardware validation: `2026-06-17 on Linux host: cargo run -- runtime install --dx 0 --dy 0 successfully provisioned owned LCD slots page 0 / element 13 / events 0 and 8 on /dev/ttyACM0 (VID:PID 303a:8123) and immediately verified an exact bundled-runtime match on dx=0 dy=0; subsequent hardware validation confirmed all step 9 behaviors pass visually on dx=0 dy=0: persistent rendering, screen clear, slow/fast activation, slow 5s timeout, fast 1s timeout, timer restart on re-activation, fast-to-slow fallback, fast-to-persistent fallback, and non-preemption of lower-layer updates while a higher-priority layer is active`
-- Open blockers: `none`
-- Next session start point: `begin step 10 runtime lifecycle work: implement runtime upgrade, repair, and remove while preserving owned-slot safety boundaries`
+- Open blockers: `step 10 hardware validation pending on a real device`
+- Next session start point: `run step 10 hardware validation for runtime upgrade, runtime repair, and runtime remove on a real device, then close the remaining hardware gate if the zero-length CONFIG clear path behaves as expected`
 
 ## Rules for every step
 
@@ -123,13 +123,13 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 
 ### Step 10: Complete runtime lifecycle commands
 
-- [ ] Implement `runtime upgrade` for older owned bundle versions.
-- [ ] Implement `runtime repair` for drifted owned content.
-- [ ] Implement `runtime remove` without touching unrelated device state.
-- [ ] Keep ownership checks explicit in the runtime manifest and code paths.
-- [ ] Add unit tests for upgrade eligibility, repair planning, and remove safety boundaries.
+- [x] Implement `runtime upgrade` for older owned bundle versions.
+- [x] Implement `runtime repair` for drifted owned content.
+- [x] Implement `runtime remove` without touching unrelated device state.
+- [x] Keep ownership checks explicit in the runtime manifest and code paths.
+- [x] Add unit tests for upgrade eligibility, repair planning, and remove safety boundaries.
 - [ ] Hardware gate: confirm upgrade, repair, and remove work safely on real hardware.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 11: Hardening and release readiness
 
@@ -153,7 +153,7 @@ Update this section as work lands.
 - Step 7: `completed on 2026-06-17 - implemented runtime install with manifest-ordered owned-slot writes, owned-slot-only scope, post-install exact-match verification, CLI wiring, and step 7 unit tests; fixed the bundled lcd-init asset to fit the real Grid CONFIG payload limit, added bundle-size validation, corrected exact-match verification to compare against the framed stored CONFIG representation returned by fetches, validated runtime install/verify/status on /dev/ttyACM0 at dx=0 dy=0, and later fixed missing PAGEACTIVE + PAGESTORE persistence so install can survive reconnects`
 - Step 8: `completed on 2026-06-17 - added screen.rs bundled field-registry loading, typed layer/value metadata conversion from the manifest inventory, strict FIELD=VALUE parsing and validation, per-layer clear planning with runtime-default clear values, and step 8 unit tests covering lookup, parsing, value errors, and invalid bundled field specs`
 - Step 9: `completed on 2026-06-17 - implemented screen set/clear/activate CLI wiring, exact runtime gating before curated sends, replaced the placeholder bundled lcd-draw asset with a minimal real renderer, compared the curated IMMEDIATE path against the working POC and found that packet sending still matches while the script body differed materially, rewrote the bundled runtime plus host compiler around compact stored helper calls, then used fresh Grid Editor hardware feedback to confirm draw-slot invocation on dx=0 dy=0, fixed the missing palette global c in bundled runtime 2026-06-17-screen-first.4, restored visible output by adding glsb(255) to the owned lcd-init runtime in bundled version 2026-06-17-screen-first.5, addressed garbled slow-layer rendering by switching owned temporary-layer drawing to literal RGB colors in bundled version 2026-06-17-screen-first.6, fixed the temporary-layer activation regression introduced there in bundled version 2026-06-17-screen-first.7, simplified the slow-layer renderer in bundled version 2026-06-17-screen-first.8 to remove the remaining white-panel/black-bar artifact while staying under the Grid CONFIG payload limit, and completed hardware validation for layered visibility, timeout restart, fallback, and non-preemption behavior on dx=0 dy=0`
-- Step 10: `not started`
+- Step 10: `in progress on 2026-06-17 - implemented runtime upgrade, runtime repair, and runtime remove; added explicit managed-slot lifecycle gating, managed-hash-based remove safety checks, zero-length CONFIG clears for owned-slot removal, and step 10 unit coverage; software verification passes, hardware validation still pending`
 - Step 11: `not started`
 
 ## Recommended session workflow
