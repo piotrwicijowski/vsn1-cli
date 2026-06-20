@@ -13,12 +13,12 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 ## Session handoff state
 
 - Overall status: `in_progress`
-- Last completed step: `step 12`
-- In-progress step: `step 13`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-20 after step 12 runtime discovery work, asset-root migration to assets/runtimes/default, and discovery/collision regression coverage)`
-- Last hardware validation: `2026-06-17 on Linux host: step 10 lifecycle validation passed on /dev/ttyACM0 at dx=0 dy=0. This predates the named-runtime redesign in 09-runtime-discovery-and-lifecycle-redesign.md and should not be treated as validation for the new backup-based install/upgrade/uninstall flow.`
+- Last completed step: `step 14`
+- In-progress step: `step 15`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-20 after step 14 storage work added frozen-runtime persistence, pre-install backup capture, replacement semantics, and regression coverage for backup/install/upgrade/repair persistence)`
+- Last hardware validation: `2026-06-20 on Linux host: step 13 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install succeeded, the frozen runtime copy under ~/.config/vsn1-cli/runtime matched via runtime status and runtime verify after manual seeding, an out-of-band lcd-draw modification surfaced as a status content mismatch and a verify failure against installed runtime 2026-06-17-screen-first.8, and removing the frozen local runtime copy produced the expected status/verify no-installed-runtime diagnostics.`
 - Open blockers: `none`
-- Next session start point: `step 13 - remove hash requirements from the manifest contract and rework verify/status around the frozen installed runtime copy`
+- Next session start point: `step 15 - change runtime install/upgrade/remove/uninstall command semantics around runtime names, backup restore, and fallback-to-clear behavior`
 
 ## Rules for every step
 
@@ -152,21 +152,21 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 
 ### Step 13: Drop hash-driven runtime identity and verify against script contents
 
-- [ ] Remove manifest hash requirements from the runtime bundle contract.
-- [ ] Keep content normalization and framed-script comparison, but compare against actual runtime assets.
-- [ ] Rework `runtime verify` and `runtime status` around the frozen installed runtime copy.
-- [ ] Add unit tests for content-match, content-drift, missing-slot, and malformed-manifest cases without hashes.
-- [ ] Hardware gate: confirm verify catches both matching and drifted script-content cases using the frozen runtime copy.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Remove manifest hash requirements from the runtime bundle contract.
+- [x] Keep content normalization and framed-script comparison, but compare against actual runtime assets.
+- [x] Rework `runtime verify` and `runtime status` around the frozen installed runtime copy.
+- [x] Add unit tests for content-match, content-drift, missing-slot, and malformed-manifest cases without hashes.
+- [x] Hardware gate: confirm verify catches both matching and drifted script-content cases using the frozen runtime copy.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 14: Add frozen runtime and pre-install backup persistence
 
-- [ ] Add host-side storage helpers for `~/.config/vsn1-cli/runtime` and `~/.config/vsn1-cli/pre-install`.
-- [ ] Freeze the installed runtime by copying the selected runtime directory locally after successful install or upgrade.
-- [ ] Capture pre-install owned-slot contents plus a restore manifest before `runtime install` overwrites the device.
-- [ ] Represent blank or missing slots in the backup so uninstall can restore them to empty content.
-- [ ] Add unit tests for frozen-runtime replacement, backup replacement, and missing-slot backup behavior.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Add host-side storage helpers for `~/.config/vsn1-cli/runtime` and `~/.config/vsn1-cli/pre-install`.
+- [x] Freeze the installed runtime by copying the selected runtime directory locally after successful install or upgrade.
+- [x] Capture pre-install owned-slot contents plus a restore manifest before `runtime install` overwrites the device.
+- [x] Represent blank or missing slots in the backup so uninstall can restore them to empty content.
+- [x] Add unit tests for frozen-runtime replacement, backup replacement, and missing-slot backup behavior.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 15: Rework runtime install, upgrade, remove, and uninstall semantics
 
@@ -203,6 +203,8 @@ Update this section as work lands.
 - Step 10: `completed on 2026-06-17 - implemented runtime upgrade, runtime repair, and runtime remove; added explicit managed-slot lifecycle gating, managed-hash-based remove safety checks, then corrected runtime remove on hardware by switching from zero-length CONFIG writes to explicit empty-script writes; hardware validation on /dev/ttyACM0 at dx=0 dy=0 confirmed remove, reinstall, negative repair/upgrade checks, positive repair after out-of-band drift, and positive upgrade from exact older bundled runtime 2026-06-17-screen-first.5 to 2026-06-17-screen-first.8`
 - Step 11: `completed on 2026-06-17 - polished clap help text across device/runtime/screen commands, tightened actionable diagnostics for targeting and field errors, added regression coverage for Lua framing, bundled runtime family loading, field parsing with embedded equals, command help text, and command parsing, confirmed Linux baseline checks plus cross-target macOS cargo check on x86_64-apple-darwin and aarch64-apple-darwin, and added user-facing README usage docs plus a validation matrix capturing current hardware coverage and the 5-10 visible updates/sec budget`
 - Step 12: `completed on 2026-06-20 - moved the checked-in dev runtime to assets/runtimes/default, removed the legacy versioned assets/runtime tree, added runtime discovery across system/user/dev roots with dev > user > system name-collision precedence, added discovery regression tests, and refactored runtime-family tests so they no longer depend on checked-in historical bundles`
+- Step 13: `completed on 2026-06-20 - removed manifest hash requirements from the runtime bundle contract, switched verify/status to compare device contents against the frozen installed runtime copy, added regression coverage for no-installed-runtime and frozen-runtime inspection behavior, and validated on Linux hardware at /dev/ttyACM0 with exact-match, drifted-content, and missing-local-runtime cases on dx=0 dy=0`
+- Step 14: `completed on 2026-06-20 - added ~/.config/vsn1-cli runtime storage helpers, froze successful installs/upgrades/repairs into ~/.config/vsn1-cli/runtime, captured pre-install owned-slot contents into a loadable ~/.config/vsn1-cli/pre-install bundle with empty-slot representation, added replacement semantics for both directories, and added regression coverage for backup capture and persistence replacement`
 
 ## Recommended session workflow
 

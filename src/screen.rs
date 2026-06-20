@@ -670,8 +670,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::protocol::frame_lua;
-    use crate::runtime_bundle::{normalized_sha256, RuntimeBundle};
+    use crate::runtime_bundle::RuntimeBundle;
 
     #[test]
     fn bundled_registry_exposes_typed_field_metadata() {
@@ -963,7 +962,6 @@ notes = "fixture"
 
     fn write_bundle_fixture(root: &Path, fields: &str) {
         let asset_content = "return 1\n";
-        let stored_hash = normalized_sha256(&frame_lua(asset_content));
 
         fs::write(root.join("lcd-init.lua"), asset_content).unwrap();
         fs::write(
@@ -981,7 +979,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-normalized_sha256 = "{stored_hash}"
 runtime_marker = "fixture:lcd-init"
 
 {fields}

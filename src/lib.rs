@@ -18,8 +18,8 @@ use crate::device::{
 };
 use crate::raw::send_screen_raw;
 use crate::runtime::{
-    inspect_bundled_runtime, install_bundled_runtime, remove_bundled_runtime,
-    repair_bundled_runtime, upgrade_bundled_runtime, verify_bundled_runtime,
+    inspect_installed_runtime, install_bundled_runtime, remove_bundled_runtime,
+    repair_bundled_runtime, upgrade_bundled_runtime, verify_installed_runtime,
     RuntimeInspectionReport, RuntimeInstallReport, RuntimeRemoveReport, RuntimeSlotStatus,
     RuntimeUpgradeReport, TransportRuntimeSlotReader,
 };
@@ -36,13 +36,13 @@ const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 disp
 const DEVICE_INFO_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --dx 0 --dy 0";
 const RUNTIME_INSTALL_AFTER_HELP: &str = "Installs the current bundled runtime into the manifest-owned slots only, then verifies an exact bundled match.";
-const RUNTIME_VERIFY_AFTER_HELP: &str = "Fails unless every owned runtime slot matches the current bundled runtime version and content exactly.";
+const RUNTIME_VERIFY_AFTER_HELP: &str = "Fails unless every owned runtime slot matches the frozen installed runtime copy under ~/.config/vsn1-cli/runtime exactly.";
 const RUNTIME_UPGRADE_AFTER_HELP: &str = "Only upgrades from an exact older managed runtime. Drifted or partially modified owned slots must be repaired instead.";
 const RUNTIME_REPAIR_AFTER_HELP: &str =
     "Reapplies the current bundled runtime when the owned slots are drifted or incomplete.";
 const RUNTIME_REMOVE_AFTER_HELP: &str =
     "Clears only the manifest-owned runtime slots and leaves unrelated device state untouched.";
-const RUNTIME_STATUS_AFTER_HELP: &str = "Shows the owned-slot inspection result even when the runtime is missing, drifted, or from an older bundled version.";
+const RUNTIME_STATUS_AFTER_HELP: &str = "Shows the owned-slot inspection result relative to the frozen installed runtime copy when one is present locally.";
 const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set fast.action=Tap --activate fast --dx 0 --dy 0\n\nCurated fields:\n  persistent.title\n  persistent.bottom\n  persistent.value\n  persistent.min\n  persistent.max\n  persistent.default\n  persistent.step\n  persistent.info\n  persistent.clamp_min\n  persistent.clamp_max\n  persistent.bank\n  slow.message\n  fast.action";
 const SCREEN_CLEAR_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0";
@@ -112,7 +112,7 @@ pub enum RuntimeCommand {
         target: TargetArgs,
     },
     #[command(
-        about = "Verify that the owned slots exactly match the bundled runtime",
+        about = "Verify that the owned slots exactly match the frozen installed runtime copy",
         after_help = RUNTIME_VERIFY_AFTER_HELP
     )]
     Verify {
@@ -144,7 +144,7 @@ pub enum RuntimeCommand {
         target: TargetArgs,
     },
     #[command(
-        about = "Inspect the owned runtime slots without enforcing an exact match",
+        about = "Inspect the owned runtime slots relative to the frozen installed runtime copy",
         after_help = RUNTIME_STATUS_AFTER_HELP
     )]
     Status {
@@ -512,7 +512,7 @@ where
     let device = select_single_device(&devices)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
-    let report = verify_bundled_runtime(target, &mut reader)?;
+    let report = verify_installed_runtime(target, &mut reader)?;
 
     Ok(render_runtime_output(
         &device.to_string(),
@@ -559,14 +559,12 @@ where
     let device = select_single_device(&devices)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
-    let report = inspect_bundled_runtime(target, &mut reader)?;
+    let report = inspect_installed_runtime(target, &mut reader)?;
 
-    Ok(render_runtime_output(
-        &device.to_string(),
-        target,
-        &report,
-        false,
-    ))
+    Ok(match report {
+        Some(report) => render_runtime_output(&device.to_string(), target, &report, false),
+        None => render_runtime_status_without_local_copy_output(&device.to_string(), target),
+    })
 }
 
 fn execute_runtime_upgrade<D, F>(
@@ -645,7 +643,7 @@ fn render_runtime_output(
     verified: bool,
 ) -> String {
     let mut output = format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nBundled runtime version: {}\nStatus: {}\n",
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nInstalled runtime version: {}\nStatus: {}\n",
         protocol::GRID_BAUD_RATE,
         report.bundle_version(),
         report.status_label(),
@@ -675,16 +673,12 @@ fn render_runtime_output(
                 format!("match on dx={} dy={}", source_target.dx, source_target.dy)
             }
             RuntimeSlotStatus::Missing => "missing or blank".to_string(),
-            RuntimeSlotStatus::Drifted {
-                actual_sha256,
-                source_target,
-            } => format!(
-                "hash mismatch on dx={} dy={} (expected {}, got {})",
-                source_target.dx,
-                source_target.dy,
-                inspection.slot.normalized_sha256,
-                actual_sha256
-            ),
+            RuntimeSlotStatus::Drifted { source_target } => {
+                format!(
+                    "content mismatch on dx={} dy={}",
+                    source_target.dx, source_target.dy
+                )
+            }
             RuntimeSlotStatus::WrongTarget { actual_target } => format!(
                 "responded from dx={} dy={} instead of the requested target",
                 actual_target.dx, actual_target.dy
@@ -700,10 +694,20 @@ fn render_runtime_output(
     }
 
     if verified {
-        output.push_str("Verification: exact bundled runtime match confirmed.\n");
+        output.push_str("Verification: exact installed runtime match confirmed.\n");
     }
 
     output
+}
+
+fn render_runtime_status_without_local_copy_output(
+    device: &str,
+    requested_target: ResolvedTarget,
+) -> String {
+    format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nInstalled runtime: none\nStatus: no frozen installed runtime was found under ~/.config/vsn1-cli/runtime\n",
+        protocol::GRID_BAUD_RATE,
+    )
 }
 
 fn screen_layer_from_layer(layer: Layer) -> RegistryScreenLayer {

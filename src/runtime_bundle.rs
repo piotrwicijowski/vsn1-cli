@@ -18,33 +18,12 @@ const MANIFEST_FILE_NAME: &str = "manifest.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeBundleError {
-    ReadManifest {
-        path: PathBuf,
-        message: String,
-    },
-    ReadBundleRoot {
-        path: PathBuf,
-        message: String,
-    },
-    ParseManifest {
-        path: PathBuf,
-        message: String,
-    },
-    ReadAsset {
-        path: PathBuf,
-        message: String,
-    },
-    InvalidManifest {
-        message: String,
-    },
-    AssetHashMismatch {
-        asset: String,
-        expected: String,
-        actual: String,
-    },
-    RuntimeNotFound {
-        name: String,
-    },
+    ReadManifest { path: PathBuf, message: String },
+    ReadBundleRoot { path: PathBuf, message: String },
+    ParseManifest { path: PathBuf, message: String },
+    ReadAsset { path: PathBuf, message: String },
+    InvalidManifest { message: String },
+    RuntimeNotFound { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +73,6 @@ pub struct OwnedRuntimeSlot {
     pub event: u8,
     pub asset: String,
     pub install_order: u32,
-    pub normalized_sha256: String,
     pub runtime_marker: String,
 }
 
@@ -149,14 +127,6 @@ impl fmt::Display for RuntimeBundleError {
                 )
             }
             Self::InvalidManifest { message } => write!(f, "invalid runtime manifest: {message}"),
-            Self::AssetHashMismatch {
-                asset,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "runtime asset hash mismatch for {asset}: expected {expected}, got {actual}"
-            ),
             Self::RuntimeNotFound { name } => write!(f, "runtime `{name}` was not found"),
         }
     }
@@ -425,20 +395,6 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
                 message: format!("duplicate owned slot location {}", slot.location_display()),
             });
         }
-
-        if slot.normalized_sha256.len() != 64
-            || !slot
-                .normalized_sha256
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        {
-            return Err(RuntimeBundleError::InvalidManifest {
-                message: format!(
-                    "owned slot {} has an invalid normalized_sha256 value",
-                    slot.name
-                ),
-            });
-        }
     }
 
     let mut field_names = HashSet::new();
@@ -464,14 +420,6 @@ fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsse
     validate_installable_script_length(&slot, &normalized_content)?;
     let stored_content = normalize_text_content(&frame_lua(&normalized_content));
     let actual_hash = sha256_hex(stored_content.as_bytes());
-
-    if actual_hash != slot.normalized_sha256 {
-        return Err(RuntimeBundleError::AssetHashMismatch {
-            asset: slot.asset.clone(),
-            expected: slot.normalized_sha256.clone(),
-            actual: actual_hash,
-        });
-    }
 
     Ok(RuntimeAsset {
         slot,
@@ -535,8 +483,6 @@ mod tests {
     fn write_fixture_runtime(root: &Path, name: &str, bundle_version: &str) {
         let runtime_root = root.join(name);
         let content = "return 1\n";
-        let hash = normalized_sha256(&frame_lua(content));
-
         fs::create_dir_all(&runtime_root).unwrap();
         fs::write(runtime_root.join("lcd-init.lua"), content).unwrap();
         fs::write(
@@ -554,7 +500,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-normalized_sha256 = "{hash}"
 runtime_marker = "fixture:lcd-init"
 "#
             ),
@@ -688,7 +633,7 @@ runtime_marker = "fixture:lcd-init"
     }
 
     #[test]
-    fn reports_hash_mismatches_from_the_manifest() {
+    fn ignores_removed_hash_fields_in_the_manifest() {
         let fixture = tempdir().unwrap();
         let root = fixture.path();
         let asset_path = root.join("lcd-init.lua");
@@ -713,20 +658,15 @@ runtime_marker = "fixture:lcd-init"
         )
         .unwrap();
 
-        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+        let bundle = RuntimeBundle::load_from_dir(root).unwrap();
 
-        assert_eq!(
-            error.to_string(),
-            "runtime asset hash mismatch for lcd-init.lua: expected aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, got 21cc312dc0da113b58ff40217cdafb0505e9602737287e43bfceb64c5997e4df"
-        );
+        assert_eq!(bundle.assets().len(), 1);
     }
 
     #[test]
     fn rejects_duplicate_field_inventory_entries() {
         let fixture = tempdir().unwrap();
         let root = fixture.path();
-        let hash = normalized_sha256("return 1\n");
-
         fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
         fs::write(
             root.join("manifest.toml"),
@@ -743,7 +683,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-normalized_sha256 = "{hash}"
 runtime_marker = "fixture:lcd-init"
 
 [[fields]]
@@ -777,8 +716,6 @@ notes = "fixture"
         let fixture = tempdir().unwrap();
         let root = fixture.path();
         let oversized = "a".repeat(909);
-        let hash = normalized_sha256(&frame_lua(&oversized));
-
         fs::write(root.join("lcd-init.lua"), oversized).unwrap();
         fs::write(
             root.join("manifest.toml"),
@@ -795,7 +732,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-normalized_sha256 = "{hash}"
 runtime_marker = "fixture:lcd-init"
 "#
             ),
