@@ -12,13 +12,13 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 
 ## Session handoff state
 
-- Overall status: `in_progress`
-- Last completed step: `step 14`
-- In-progress step: `step 15`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-20 after step 15 software work switched runtime install/upgrade to named runtime selection, changed remove/uninstall to backup-restore-or-clear semantics, and added command/lifecycle regression coverage)`
-- Last hardware validation: `2026-06-20 on Linux host: step 13 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install succeeded, the frozen runtime copy under ~/.config/vsn1-cli/runtime matched via runtime status and runtime verify after manual seeding, an out-of-band lcd-draw modification surfaced as a status content mismatch and a verify failure against installed runtime 2026-06-17-screen-first.8, and removing the frozen local runtime copy produced the expected status/verify no-installed-runtime diagnostics.`
-- Open blockers: `step 15 hardware validation still pending`
-- Next session start point: `finish step 15 with hardware validation for named install/upgrade and remove/uninstall restore-or-clear behavior, then begin step 16`
+- Overall status: `completed`
+- Last completed step: `step 16`
+- In-progress step: `none`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-20 after step 16 moved curated screen metadata loading to the frozen installed runtime copy, updated help/docs/validation notes for named runtimes and uninstall semantics, and added installed-runtime screen registry regression coverage)`
+- Last hardware validation: `2026-06-20 on Linux host: step 15 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default succeeded with resolved runtime default (dev); runtime remove restored the pre-install owned slots successfully; reinstall followed by runtime remove with the pre-install backup unavailable cleared the owned slots and printed the expected warning fallback message.`
+- Open blockers: `none`
+- Next session start point: `implementation checklist complete; begin new scoped work or follow-up hardware validation as needed`
 
 ## Rules for every step
 
@@ -176,16 +176,16 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 - [x] Add `runtime uninstall` as an alias of `runtime remove`.
 - [x] When backup data is missing or incomplete, clear owned slots, print a warning, and continue cleanup.
 - [x] Add unit tests for install-name resolution, upgrade-without-backup-refresh, backup-restore removal, and fallback-to-clear removal.
-- [ ] Hardware gate: confirm install, upgrade, uninstall-with-restore, and uninstall-fallback-to-clear on a real device.
+- [x] Hardware gate: confirm install, upgrade, uninstall-with-restore, and uninstall-fallback-to-clear on a real device.
 - [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 16: Reconnect curated screen behavior and docs to the frozen runtime model
 
-- [ ] Load curated screen field metadata from the frozen installed runtime instead of a compile-time bundled runtime.
-- [ ] Update CLI help text, README usage, and validation docs for named runtimes and backup-based uninstall.
-- [ ] Add regression tests covering frozen-runtime registry loading and runtime command parsing.
-- [ ] Confirm Linux and macOS build health after the runtime redesign.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin`.
+- [x] Load curated screen field metadata from the frozen installed runtime instead of a compile-time bundled runtime.
+- [x] Update CLI help text, README usage, and validation docs for named runtimes and backup-based uninstall.
+- [x] Add regression tests covering frozen-runtime registry loading and runtime command parsing.
+- [x] Confirm Linux and macOS build health after the runtime redesign.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin`.
 
 ## Step completion log
 
@@ -205,6 +205,8 @@ Update this section as work lands.
 - Step 12: `completed on 2026-06-20 - moved the checked-in dev runtime to assets/runtimes/default, removed the legacy versioned assets/runtime tree, added runtime discovery across system/user/dev roots with dev > user > system name-collision precedence, added discovery regression tests, and refactored runtime-family tests so they no longer depend on checked-in historical bundles`
 - Step 13: `completed on 2026-06-20 - removed manifest hash requirements from the runtime bundle contract, switched verify/status to compare device contents against the frozen installed runtime copy, added regression coverage for no-installed-runtime and frozen-runtime inspection behavior, and validated on Linux hardware at /dev/ttyACM0 with exact-match, drifted-content, and missing-local-runtime cases on dx=0 dy=0`
 - Step 14: `completed on 2026-06-20 - added ~/.config/vsn1-cli runtime storage helpers, froze successful installs/upgrades/repairs into ~/.config/vsn1-cli/runtime, captured pre-install owned-slot contents into a loadable ~/.config/vsn1-cli/pre-install bundle with empty-slot representation, added replacement semantics for both directories, and added regression coverage for backup capture and persistence replacement`
+- Step 15: `completed on 2026-06-20 - switched runtime install/upgrade to named runtime selection and runtime discovery resolution, changed remove/uninstall to backup-restore-or-clear semantics with frozen-runtime cleanup, added command and lifecycle regression coverage, and validated on Linux hardware at /dev/ttyACM0 for install default, remove restore, and fallback-to-clear remove behavior on dx=0 dy=0`
+- Step 16: `completed on 2026-06-20 - switched curated screen set/clear metadata loading from compile-time bundled assets to the frozen installed runtime copy, updated help text plus README and validation docs for the named-runtime lifecycle, added installed-runtime screen registry regression coverage, and reconfirmed Linux plus macOS cross-target build health`
 
 ## Recommended session workflow
 

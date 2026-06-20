@@ -12,13 +12,14 @@
 | Date | Host | Device target | Coverage | Result |
 | --- | --- | --- | --- | --- |
 | 2026-06-17 | Linux | `/dev/ttyACM0`, `dx=0 dy=0` | device discovery, `screen raw`, runtime install/verify/status, layered `screen set` / `screen clear` / `screen activate`, runtime upgrade/repair/remove | pass |
+| 2026-06-20 | Linux | `/dev/ttyACM0`, `dx=0 dy=0` | frozen-runtime `runtime status` / `runtime verify` exact-match, drift, and missing-local-copy behavior; named `runtime install default`; `runtime remove` restore-from-backup; `runtime remove` fallback-to-clear | pass |
 
 ## Known Limits
 
 - Reliable visible screen updates are currently budgeted at about `5-10` updates per second depending on payload shape.
 - The fast live path requires framed `IMMEDIATE` Lua payloads in the form `<?lua --[[@cb]] ... ?>`.
 - The current validated runtime contract owns only the LCD init and LCD draw slots identified in the POC.
-- Curated screen commands now take the same fast immediate-send path as `screen raw`; runtime lifecycle commands remain available to provision and verify the bundled layered runtime separately.
+- Curated screen commands now take the same fast immediate-send path as `screen raw`; `screen set` and `screen clear` load their field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
 
 ## Follow-Up Recording Rules
 

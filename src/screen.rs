@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
+use std::path::Path;
 
+use crate::runtime::installed_runtime_dir;
 use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleError, RuntimeFieldSpec};
 
 const TEXT_LIST_ITEM_COUNT: usize = 8;
@@ -31,6 +33,7 @@ pub enum ScreenError {
     DuplicateFieldAssignment {
         field: String,
     },
+    InstalledRuntimeMissing,
     InvalidActivationMix {
         activate: ScreenLayer,
         field: String,
@@ -115,6 +118,10 @@ impl fmt::Display for ScreenError {
                 f,
                 "screen field `{field}` was assigned more than once in the same command"
             ),
+            Self::InstalledRuntimeMissing => write!(
+                f,
+                "no frozen installed runtime was found under ~/.config/vsn1-cli/runtime; run `vsn1-cli runtime install <name>` first"
+            ),
             Self::InvalidActivationMix {
                 activate,
                 field,
@@ -144,6 +151,7 @@ impl StdError for ScreenError {
             | Self::UnknownField { .. }
             | Self::InvalidValue { .. }
             | Self::DuplicateFieldAssignment { .. }
+            | Self::InstalledRuntimeMissing
             | Self::InvalidActivationMix { .. }
             | Self::UnsupportedActivationLayer { .. } => None,
         }
@@ -246,8 +254,21 @@ impl ScreenAssignment {
 }
 
 impl ScreenFieldRegistry {
+    pub fn installed() -> Result<Self> {
+        Self::from_optional_runtime_dir(installed_runtime_dir().as_deref())
+    }
+
     pub fn bundled() -> Result<Self> {
         let bundle = RuntimeBundle::bundled()?;
+        Self::from_bundle(&bundle)
+    }
+
+    fn from_optional_runtime_dir(runtime_dir: Option<&Path>) -> Result<Self> {
+        let Some(runtime_dir) = runtime_dir.filter(|path| path.is_dir()) else {
+            return Err(ScreenError::InstalledRuntimeMissing);
+        };
+
+        let bundle = RuntimeBundle::load_from_dir(runtime_dir)?;
         Self::from_bundle(&bundle)
     }
 
@@ -687,6 +708,39 @@ mod tests {
         assert_eq!(
             info.clear_value(),
             &ScreenValue::TextList(vec![DEFAULT_INFO_LABEL.to_string(); TEXT_LIST_ITEM_COUNT])
+        );
+    }
+
+    #[test]
+    fn installed_registry_loads_from_runtime_copy() {
+        let fixture = tempdir().unwrap();
+        write_bundle_fixture(
+            fixture.path(),
+            r#"
+[[fields]]
+name = "persistent.title"
+layer = "persistent"
+value_kind = "text"
+runtime_key = "t"
+notes = "fixture"
+"#,
+        );
+
+        let registry =
+            ScreenFieldRegistry::from_optional_runtime_dir(Some(fixture.path())).unwrap();
+        assert_eq!(
+            registry.field("persistent.title").unwrap().runtime_key(),
+            "t"
+        );
+    }
+
+    #[test]
+    fn installed_registry_requires_runtime_copy() {
+        let error = ScreenFieldRegistry::from_optional_runtime_dir(None).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "no frozen installed runtime was found under ~/.config/vsn1-cli/runtime; run `vsn1-cli runtime install <name>` first"
         );
     }
 

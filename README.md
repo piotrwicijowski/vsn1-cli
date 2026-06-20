@@ -2,14 +2,14 @@
 
 Standalone Rust CLI for controlling the `VSN1` screen directly over USB.
 
-This project is intentionally screen-first and one-shot only. The CLI provisions a bundled known-good runtime onto the device, then uses fast framed `IMMEDIATE` Lua updates for live screen control.
+This project is intentionally screen-first and one-shot only. The CLI provisions a named runtime onto the device, freezes a local copy under `~/.config/vsn1-cli/runtime`, and then uses fast framed `IMMEDIATE` Lua updates for live screen control.
 
 ## Current Scope
 
 - Linux is the primary validated host today.
 - macOS support is a target, but host-side validation is still in progress.
 - Curated public commands are grouped under `device`, `runtime`, and `screen`.
-- Curated screen mutations use the bundled layered runtime shape when it is installed.
+- Curated screen mutations load their field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
 
 ## Install And Build
 
@@ -46,41 +46,56 @@ Targeting rules:
 
 ## Runtime Commands
 
-Install the bundled runtime into the manifest-owned slots:
+Install a discovered runtime into the manifest-owned slots:
 
 ```bash
-cargo run -- runtime install
+cargo run -- runtime install default
 ```
 
-Verify exact bundled version and content match:
+Verify exact frozen installed-runtime content match:
 
 ```bash
 cargo run -- runtime verify
 ```
 
-Inspect status without requiring an exact match:
+Inspect status relative to the frozen installed runtime copy:
 
 ```bash
 cargo run -- runtime status
 ```
 
-Repair drifted owned slots:
+Repair drifted owned slots from the frozen installed runtime copy:
 
 ```bash
 cargo run -- runtime repair
 ```
 
-Upgrade from an exact older managed runtime:
+Overwrite the device from a discovered runtime without refreshing the pre-install backup:
 
 ```bash
-cargo run -- runtime upgrade
+cargo run -- runtime upgrade default
 ```
 
-Remove the bundled runtime from owned slots only:
+Restore the pre-install backup or clear the frozen runtime's owned slots:
 
 ```bash
 cargo run -- runtime remove
+cargo run -- runtime uninstall
 ```
+
+Runtime discovery roots:
+
+- `/usr/share/vsn1-cli/runtimes`
+- `~/.local/share/vsn1-cli/runtimes`
+- `assets/runtimes` when running from a dev checkout
+
+Name collisions resolve by source precedence: `dev` > `user` > `system`.
+
+Runtime lifecycle persistence:
+
+- `runtime install <name>` refreshes `~/.config/vsn1-cli/pre-install` and freezes the selected runtime under `~/.config/vsn1-cli/runtime`.
+- `runtime upgrade <name>` refreshes `~/.config/vsn1-cli/runtime` but does not refresh `~/.config/vsn1-cli/pre-install`.
+- `runtime remove` / `runtime uninstall` restore from `~/.config/vsn1-cli/pre-install` when available, otherwise they clear the frozen runtime's owned slots with a warning.
 
 ## Screen Commands
 
@@ -122,7 +137,7 @@ Send expert-facing raw Lua:
 cargo run -- screen raw "lcd:ldrr(0,0,128,64); lcd:ldsw()"
 ```
 
-Current curated fields:
+Current default-runtime curated fields:
 
 - `persistent.title`
 - `persistent.bottom`
@@ -141,7 +156,8 @@ Current curated fields:
 ## Runtime Compatibility Rules
 
 - Curated `screen set`, `screen clear`, and `screen activate` commands send immediate runtime-helper Lua without a preflight exact-match verification step.
-- `runtime install` remains the supported way to provision the bundled layered runtime that those curated helpers target.
+- `screen set` and `screen clear` load their curated field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
+- `runtime install <name>` is the supported way to provision the runtime that curated helpers target.
 - `screen raw` bypasses curated field validation and runtime-shape compilation, but still uses the same transport and packet framing path.
 - Runtime lifecycle commands only touch the manifest-owned slots.
 
