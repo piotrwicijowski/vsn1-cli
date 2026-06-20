@@ -2,23 +2,23 @@
 
 ## Purpose
 
-This checklist turns the decisions in `01` through `07` into an implementation sequence that can be executed across multiple agent sessions.
+This checklist turns the decisions in `01` through `09` into an implementation sequence that can be executed across multiple agent sessions.
 
 ## Current baseline
 
-1. `vsn1-cli/` currently contains planning documents only.
-2. No Rust package exists yet.
-3. The first implementation step must create a compiling crate skeleton.
+1. `vsn1-cli/` is now a working Rust crate with device, runtime, and screen commands.
+2. Steps `1` through `11` are complete and validated against the earlier bundled-hash runtime model.
+3. Steps `12+` track the named-runtime redesign described in `09-runtime-discovery-and-lifecycle-redesign.md`.
 
 ## Session handoff state
 
-- Overall status: `completed`
+- Overall status: `in_progress`
 - Last completed step: `step 11`
-- In-progress step: `none`
+- In-progress step: `step 12`
 - Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-17 after polishing CLI help/diagnostics, adding step 11 regression tests and user-facing docs, and confirming cross-target macOS build health from Linux)`
-- Last hardware validation: `2026-06-17 on Linux host: step 10 lifecycle validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime remove now succeeds using explicit empty-script writes to owned slots; post-remove status shows both owned slots drifted to the canonical empty callback hash and runtime verify fails as expected; runtime install restores an exact bundled match; runtime repair fails on an exact current install and succeeds after an out-of-band owned-slot modification in Grid Editor; runtime upgrade succeeds from an exact older managed runtime and reports upgrade source bundled version 2026-06-17-screen-first.5 before verifying an exact bundled-runtime match on 2026-06-17-screen-first.8`
+- Last hardware validation: `2026-06-17 on Linux host: step 10 lifecycle validation passed on /dev/ttyACM0 at dx=0 dy=0. This predates the named-runtime redesign in 09-runtime-discovery-and-lifecycle-redesign.md and should not be treated as validation for the new backup-based install/upgrade/uninstall flow.`
 - Open blockers: `none`
-- Next session start point: `implementation checklist complete; begin new scoped work or follow-up hardware validation as needed`
+- Next session start point: `step 12 - move runtime assets to assets/runtimes/default and add runtime discovery roots before touching lifecycle behavior`
 
 ## Rules for every step
 
@@ -30,6 +30,7 @@ This checklist turns the decisions in `01` through `07` into an implementation s
    - `cargo check`
 4. If a step changes runtime behavior that depends on hardware, record the hardware result before closing the step.
 5. At the end of each session, update the handoff state in this file.
+6. For runtime work after step 11, treat `09-runtime-discovery-and-lifecycle-redesign.md` as the controlling plan when older steps mention bundled-hash behavior.
 
 ## Step-by-step checklist
 
@@ -140,6 +141,52 @@ This checklist turns the decisions in `01` through `07` into an implementation s
 - [x] Record the hardware validation matrix and known limits such as the `5-10` visible updates/sec budget.
 - [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
+### Step 12: Introduce named runtime discovery and repo layout migration
+
+- [ ] Move the active repo runtime from `assets/runtime/<bundle-version>` to `assets/runtimes/default`.
+- [ ] Remove the legacy versioned runtime directories from `assets/runtime` once the new root is wired.
+- [ ] Add runtime discovery across system, user, and dev roots.
+- [ ] Resolve runtime-name collisions by `dev` > `user` > `system` precedence.
+- [ ] Add unit tests for discovery, invalid runtime directories, and collision resolution.
+- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+
+### Step 13: Drop hash-driven runtime identity and verify against script contents
+
+- [ ] Remove manifest hash requirements from the runtime bundle contract.
+- [ ] Keep content normalization and framed-script comparison, but compare against actual runtime assets.
+- [ ] Rework `runtime verify` and `runtime status` around the frozen installed runtime copy.
+- [ ] Add unit tests for content-match, content-drift, missing-slot, and malformed-manifest cases without hashes.
+- [ ] Hardware gate: confirm verify catches both matching and drifted script-content cases using the frozen runtime copy.
+- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+
+### Step 14: Add frozen runtime and pre-install backup persistence
+
+- [ ] Add host-side storage helpers for `~/.config/vsn1-cli/runtime` and `~/.config/vsn1-cli/pre-install`.
+- [ ] Freeze the installed runtime by copying the selected runtime directory locally after successful install or upgrade.
+- [ ] Capture pre-install owned-slot contents plus a restore manifest before `runtime install` overwrites the device.
+- [ ] Represent blank or missing slots in the backup so uninstall can restore them to empty content.
+- [ ] Add unit tests for frozen-runtime replacement, backup replacement, and missing-slot backup behavior.
+- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+
+### Step 15: Rework runtime install, upgrade, remove, and uninstall semantics
+
+- [ ] Change `runtime install` to require a runtime name and refresh the pre-install backup.
+- [ ] Change `runtime upgrade` to require a runtime name and skip backup refresh.
+- [ ] Make `runtime remove` restore from backup when present.
+- [ ] Add `runtime uninstall` as an alias of `runtime remove`.
+- [ ] When backup data is missing or incomplete, clear owned slots, print a warning, and continue cleanup.
+- [ ] Add unit tests for install-name resolution, upgrade-without-backup-refresh, backup-restore removal, and fallback-to-clear removal.
+- [ ] Hardware gate: confirm install, upgrade, uninstall-with-restore, and uninstall-fallback-to-clear on a real device.
+- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+
+### Step 16: Reconnect curated screen behavior and docs to the frozen runtime model
+
+- [ ] Load curated screen field metadata from the frozen installed runtime instead of a compile-time bundled runtime.
+- [ ] Update CLI help text, README usage, and validation docs for named runtimes and backup-based uninstall.
+- [ ] Add regression tests covering frozen-runtime registry loading and runtime command parsing.
+- [ ] Confirm Linux and macOS build health after the runtime redesign.
+- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin`.
+
 ## Step completion log
 
 Update this section as work lands.
@@ -155,6 +202,7 @@ Update this section as work lands.
 - Step 9: `completed on 2026-06-17 - implemented screen set/clear/activate CLI wiring, exact runtime gating before curated sends, replaced the placeholder bundled lcd-draw asset with a minimal real renderer, compared the curated IMMEDIATE path against the working POC and found that packet sending still matches while the script body differed materially, rewrote the bundled runtime plus host compiler around compact stored helper calls, then used fresh Grid Editor hardware feedback to confirm draw-slot invocation on dx=0 dy=0, fixed the missing palette global c in bundled runtime 2026-06-17-screen-first.4, restored visible output by adding glsb(255) to the owned lcd-init runtime in bundled version 2026-06-17-screen-first.5, addressed garbled slow-layer rendering by switching owned temporary-layer drawing to literal RGB colors in bundled version 2026-06-17-screen-first.6, fixed the temporary-layer activation regression introduced there in bundled version 2026-06-17-screen-first.7, simplified the slow-layer renderer in bundled version 2026-06-17-screen-first.8 to remove the remaining white-panel/black-bar artifact while staying under the Grid CONFIG payload limit, and completed hardware validation for layered visibility, timeout restart, fallback, and non-preemption behavior on dx=0 dy=0`
 - Step 10: `completed on 2026-06-17 - implemented runtime upgrade, runtime repair, and runtime remove; added explicit managed-slot lifecycle gating, managed-hash-based remove safety checks, then corrected runtime remove on hardware by switching from zero-length CONFIG writes to explicit empty-script writes; hardware validation on /dev/ttyACM0 at dx=0 dy=0 confirmed remove, reinstall, negative repair/upgrade checks, positive repair after out-of-band drift, and positive upgrade from exact older bundled runtime 2026-06-17-screen-first.5 to 2026-06-17-screen-first.8`
 - Step 11: `completed on 2026-06-17 - polished clap help text across device/runtime/screen commands, tightened actionable diagnostics for targeting and field errors, added regression coverage for Lua framing, bundled runtime family loading, field parsing with embedded equals, command help text, and command parsing, confirmed Linux baseline checks plus cross-target macOS cargo check on x86_64-apple-darwin and aarch64-apple-darwin, and added user-facing README usage docs plus a validation matrix capturing current hardware coverage and the 5-10 visible updates/sec budget`
+- Step 12: `pending - see 09-runtime-discovery-and-lifecycle-redesign.md for the post-step-11 named-runtime redesign that supersedes the older bundled-hash runtime assumptions`
 
 ## Recommended session workflow
 

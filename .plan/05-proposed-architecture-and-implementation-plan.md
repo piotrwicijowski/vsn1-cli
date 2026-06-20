@@ -1,5 +1,13 @@
 # VSN1 CLI Architecture And Implementation Plan
 
+## Runtime redesign note
+
+The original runtime sections in this document were written around one bundled runtime family plus exact hash matching.
+
+That is no longer the intended direction.
+
+Use `09-runtime-discovery-and-lifecycle-redesign.md` as the controlling runtime plan for all new runtime work. When this file and `09` disagree, follow `09`.
+
 ## Decision summary
 
 The current planned shape for `vsn1-cli` v1 is:
@@ -15,8 +23,8 @@ The current planned shape for `vsn1-cli` v1 is:
 9. `fast` falls back to active `slow` when present, otherwise `persistent`
 10. layer field names should use dotted public names such as `persistent.title`
 11. layers may expose different curated parameter sets
-12. bundled known-good runtime/profile asset set
-13. exact runtime version match required for runtime-dependent commands
+12. multiple named runtime/profile bundles discovered from system, user, and dev roots
+13. runtime verification should compare device slots against the frozen installed runtime copy instead of relying on manifest hashes
 14. fail-fast behavior with clear diagnostics
 15. reusable Rust library plus thin CLI binary
 16. hardware-in-loop validation required for major milestones
@@ -53,8 +61,8 @@ Keep the initial implementation as a single Rust package with both a library and
 vsn1-cli/
   Cargo.toml
   assets/
-    runtime/
-      <bundle-version>/
+    runtimes/
+      default/
         manifest.toml
         lcd-init.lua
         lcd-draw.lua
