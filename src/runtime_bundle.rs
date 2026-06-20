@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
@@ -10,8 +10,10 @@ use sha2::{Digest, Sha256};
 use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
 
 pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-17-screen-first.8";
+pub const BUNDLED_RUNTIME_NAME: &str = "default";
 
-const BUNDLED_RUNTIME_ROOT: &str = "assets/runtime";
+const BUNDLED_RUNTIME_ROOT: &str = "assets/runtimes";
+const SYSTEM_RUNTIME_ROOT: &str = "/usr/share/vsn1-cli/runtimes";
 const MANIFEST_FILE_NAME: &str = "manifest.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +42,9 @@ pub enum RuntimeBundleError {
         expected: String,
         actual: String,
     },
+    RuntimeNotFound {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +52,26 @@ pub struct RuntimeBundle {
     root: PathBuf,
     manifest: RuntimeBundleManifest,
     assets: Vec<RuntimeAsset>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeSource {
+    System,
+    User,
+    Dev,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRoot {
+    pub source: RuntimeSource,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredRuntime {
+    pub name: String,
+    pub source: RuntimeSource,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -132,6 +157,7 @@ impl fmt::Display for RuntimeBundleError {
                 f,
                 "runtime asset hash mismatch for {asset}: expected {expected}, got {actual}"
             ),
+            Self::RuntimeNotFound { name } => write!(f, "runtime `{name}` was not found"),
         }
     }
 }
@@ -144,7 +170,11 @@ impl RuntimeBundle {
     }
 
     pub fn load_bundled_family() -> Result<Vec<Self>> {
-        let root = bundled_runtime_root_dir();
+        Self::load_family_from_dir(bundled_runtime_root_dir())
+    }
+
+    pub fn load_family_from_dir(path: impl AsRef<Path>) -> Result<Vec<Self>> {
+        let root = path.as_ref().to_path_buf();
         let entries = fs::read_dir(&root).map_err(|error| RuntimeBundleError::ReadBundleRoot {
             path: root.clone(),
             message: error.to_string(),
@@ -226,14 +256,131 @@ impl OwnedRuntimeSlot {
     }
 }
 
+impl RuntimeSource {
+    fn priority(self) -> u8 {
+        match self {
+            Self::System => 0,
+            Self::User => 1,
+            Self::Dev => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Dev => "dev",
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, RuntimeBundleError>;
 
 pub fn bundled_runtime_dir() -> PathBuf {
-    bundled_runtime_root_dir().join(BUNDLED_RUNTIME_VERSION)
+    bundled_runtime_root_dir().join(BUNDLED_RUNTIME_NAME)
 }
 
 pub fn bundled_runtime_root_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLED_RUNTIME_ROOT)
+}
+
+pub fn system_runtime_root_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_RUNTIME_ROOT)
+}
+
+pub fn user_runtime_root_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/share/vsn1-cli/runtimes"))
+}
+
+pub fn runtime_roots() -> Vec<RuntimeRoot> {
+    let mut roots = Vec::new();
+
+    let system_root = system_runtime_root_dir();
+    if system_root.is_dir() {
+        roots.push(RuntimeRoot {
+            source: RuntimeSource::System,
+            path: system_root,
+        });
+    }
+
+    if let Some(user_root) = user_runtime_root_dir().filter(|root| root.is_dir()) {
+        roots.push(RuntimeRoot {
+            source: RuntimeSource::User,
+            path: user_root,
+        });
+    }
+
+    let dev_root = bundled_runtime_root_dir();
+    if dev_root.is_dir() {
+        roots.push(RuntimeRoot {
+            source: RuntimeSource::Dev,
+            path: dev_root,
+        });
+    }
+
+    roots
+}
+
+pub fn discover_runtimes() -> Result<Vec<DiscoveredRuntime>> {
+    discover_runtimes_in_roots(&runtime_roots())
+}
+
+pub fn resolve_runtime(name: &str) -> Result<DiscoveredRuntime> {
+    discover_runtimes()?
+        .into_iter()
+        .find(|runtime| runtime.name == name)
+        .ok_or_else(|| RuntimeBundleError::RuntimeNotFound {
+            name: name.to_string(),
+        })
+}
+
+fn discover_runtimes_in_roots(roots: &[RuntimeRoot]) -> Result<Vec<DiscoveredRuntime>> {
+    let mut runtimes = BTreeMap::<String, DiscoveredRuntime>::new();
+
+    for root in roots {
+        if !root.path.exists() {
+            continue;
+        }
+
+        let entries =
+            fs::read_dir(&root.path).map_err(|error| RuntimeBundleError::ReadBundleRoot {
+                path: root.path.clone(),
+                message: error.to_string(),
+            })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|error| RuntimeBundleError::ReadBundleRoot {
+                path: root.path.clone(),
+                message: error.to_string(),
+            })?;
+            let path = entry.path();
+            if !path.is_dir() || !path.join(MANIFEST_FILE_NAME).is_file() {
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            let candidate = DiscoveredRuntime {
+                name: name.to_string(),
+                source: root.source,
+                path: path.clone(),
+            };
+
+            match runtimes.get(name) {
+                Some(existing) if existing.source.priority() >= candidate.source.priority() => {}
+                _ => {
+                    runtimes.insert(name.to_string(), candidate);
+                }
+            }
+        }
+    }
+
+    Ok(runtimes.into_values().collect())
 }
 
 pub fn normalize_text_content(content: &str) -> String {
@@ -385,10 +532,41 @@ mod tests {
 
     use tempfile::tempdir;
 
+    fn write_fixture_runtime(root: &Path, name: &str, bundle_version: &str) {
+        let runtime_root = root.join(name);
+        let content = "return 1\n";
+        let hash = normalized_sha256(&frame_lua(content));
+
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::write(runtime_root.join("lcd-init.lua"), content).unwrap();
+        fs::write(
+            runtime_root.join("manifest.toml"),
+            format!(
+                r#"
+bundle_version = "{bundle_version}"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+normalized_sha256 = "{hash}"
+runtime_marker = "fixture:lcd-init"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn bundled_runtime_manifest_and_assets_load() {
         let bundle = RuntimeBundle::bundled().unwrap();
 
+        assert_eq!(bundle.root(), bundled_runtime_dir().as_path());
         assert_eq!(bundle.manifest().bundle_version, BUNDLED_RUNTIME_VERSION);
         assert_eq!(bundle.assets().len(), 2);
         assert_eq!(bundle.assets()[0].slot.name, "lcd-init");
@@ -418,6 +596,84 @@ mod tests {
         sorted_versions.sort();
 
         assert_eq!(versions, sorted_versions);
+    }
+
+    #[test]
+    fn discovers_runtime_names_from_all_roots_with_precedence() {
+        let fixture = tempdir().unwrap();
+        let system_root = fixture.path().join("system");
+        let user_root = fixture.path().join("user");
+        let dev_root = fixture.path().join("dev");
+
+        write_fixture_runtime(&system_root, "default", "system-default");
+        write_fixture_runtime(&user_root, "default", "user-default");
+        write_fixture_runtime(&dev_root, "default", "dev-default");
+        write_fixture_runtime(&system_root, "legacy", "system-legacy");
+        write_fixture_runtime(&user_root, "local", "user-local");
+
+        let discovered = discover_runtimes_in_roots(&[
+            RuntimeRoot {
+                source: RuntimeSource::System,
+                path: system_root.clone(),
+            },
+            RuntimeRoot {
+                source: RuntimeSource::User,
+                path: user_root.clone(),
+            },
+            RuntimeRoot {
+                source: RuntimeSource::Dev,
+                path: dev_root.clone(),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|runtime| (runtime.name.as_str(), runtime.source))
+                .collect::<Vec<_>>(),
+            vec![
+                ("default", RuntimeSource::Dev),
+                ("legacy", RuntimeSource::System),
+                ("local", RuntimeSource::User),
+            ]
+        );
+        assert_eq!(
+            discovered
+                .iter()
+                .find(|runtime| runtime.name == "default")
+                .unwrap()
+                .path,
+            dev_root.join("default")
+        );
+    }
+
+    #[test]
+    fn discovery_ignores_non_runtime_directories() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("dev");
+
+        fs::create_dir_all(root.join("not-a-runtime")).unwrap();
+        write_fixture_runtime(&root, "default", "dev-default");
+
+        let discovered = discover_runtimes_in_roots(&[RuntimeRoot {
+            source: RuntimeSource::Dev,
+            path: root,
+        }])
+        .unwrap();
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].name, "default");
+    }
+
+    #[test]
+    fn resolve_runtime_reports_missing_name() {
+        let error = resolve_runtime("definitely-missing").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "runtime `definitely-missing` was not found"
+        );
     }
 
     #[test]

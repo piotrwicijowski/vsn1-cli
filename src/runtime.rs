@@ -559,8 +559,26 @@ where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
 {
     let current_bundle = RuntimeBundle::bundled()?;
+    let bundled_family = RuntimeBundle::load_bundled_family()?;
 
-    match classify_runtime_lifecycle_state(&current_bundle, requested_target, reader)? {
+    upgrade_runtime_bundle(&current_bundle, &bundled_family, requested_target, reader)
+}
+
+fn upgrade_runtime_bundle<R>(
+    current_bundle: &RuntimeBundle,
+    bundled_family: &[RuntimeBundle],
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeUpgradeReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
+    match classify_runtime_lifecycle_state(
+        current_bundle,
+        bundled_family,
+        requested_target,
+        reader,
+    )? {
         RuntimeLifecycleState::ExactCurrent => Err(RuntimeError::verification_failed(format!(
             "bundled runtime {} is already installed exactly; runtime upgrade only applies to older managed bundle versions",
             current_bundle.manifest().bundle_version
@@ -589,8 +607,9 @@ where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
 {
     let current_bundle = RuntimeBundle::bundled()?;
+    let bundled_family = RuntimeBundle::load_bundled_family()?;
 
-    match classify_runtime_lifecycle_state(&current_bundle, requested_target, reader)? {
+    match classify_runtime_lifecycle_state(&current_bundle, &bundled_family, requested_target, reader)? {
         RuntimeLifecycleState::ExactCurrent => Err(RuntimeError::verification_failed(format!(
             "bundled runtime {} is already installed exactly; runtime repair is only for drifted or partial managed content",
             current_bundle.manifest().bundle_version
@@ -617,7 +636,8 @@ where
     R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer,
 {
     let bundle = RuntimeBundle::bundled()?;
-    let managed_hashes = managed_slot_hashes_for_bundle(&bundle)?;
+    let bundled_family = RuntimeBundle::load_bundled_family()?;
+    let managed_hashes = managed_slot_hashes_for_bundle(&bundle, &bundled_family)?;
     let removable_slots = plan_runtime_remove(&bundle, &managed_hashes, requested_target, reader)?;
 
     if removable_slots.is_empty() {
@@ -687,6 +707,7 @@ where
 
 fn classify_runtime_lifecycle_state<R>(
     current_bundle: &RuntimeBundle,
+    bundled_family: &[RuntimeBundle],
     requested_target: ResolvedTarget,
     reader: &mut R,
 ) -> Result<RuntimeLifecycleState>
@@ -706,12 +727,12 @@ where
         return Ok(RuntimeLifecycleState::Missing);
     }
 
-    for bundle in RuntimeBundle::load_bundled_family()? {
+    for bundle in bundled_family {
         if bundle.manifest().bundle_version == current_bundle.manifest().bundle_version {
             continue;
         }
 
-        if inspect_runtime_bundle(&bundle, requested_target, reader)?.is_exact_match() {
+        if inspect_runtime_bundle(bundle, requested_target, reader)?.is_exact_match() {
             return Ok(RuntimeLifecycleState::ExactOlder {
                 bundle_version: bundle.manifest().bundle_version.clone(),
             });
@@ -721,14 +742,17 @@ where
     Ok(RuntimeLifecycleState::DriftedOrIncomplete)
 }
 
-fn managed_slot_hashes_for_bundle(bundle: &RuntimeBundle) -> Result<BTreeMap<String, Vec<String>>> {
+fn managed_slot_hashes_for_bundle(
+    bundle: &RuntimeBundle,
+    bundled_family: &[RuntimeBundle],
+) -> Result<BTreeMap<String, Vec<String>>> {
     let mut managed_hashes = bundle
         .assets()
         .iter()
         .map(|asset| (asset.slot.name.clone(), (asset.slot.clone(), Vec::new())))
         .collect::<BTreeMap<_, _>>();
 
-    for historical_bundle in RuntimeBundle::load_bundled_family()? {
+    for historical_bundle in bundled_family {
         let mut seen_slots = Vec::new();
 
         for asset in historical_bundle.assets() {
@@ -1188,6 +1212,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::Path;
 
     use tempfile::tempdir;
 
@@ -1317,6 +1342,48 @@ mod tests {
             );
             Ok(())
         }
+    }
+
+    fn write_runtime_fixture(root: &Path, name: &str, bundle_version: &str, draw_content: &str) {
+        let runtime_root = root.join(name);
+        let init_content = "return 'init'\n";
+
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::write(runtime_root.join("lcd-init.lua"), init_content).unwrap();
+        fs::write(runtime_root.join("lcd-draw.lua"), draw_content).unwrap();
+        fs::write(
+            runtime_root.join("manifest.toml"),
+            format!(
+                r#"
+bundle_version = "{bundle_version}"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+normalized_sha256 = "{}"
+runtime_marker = "fixture:lcd-init"
+
+[[owned_slots]]
+name = "lcd-draw"
+page = 0
+element = 13
+event = 8
+asset = "lcd-draw.lua"
+install_order = 20
+normalized_sha256 = "{}"
+runtime_marker = "fixture:lcd-draw"
+"#,
+                normalized_sha256(&frame_lua(init_content)),
+                normalized_sha256(&frame_lua(draw_content)),
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1534,11 +1601,23 @@ runtime_marker = "fixture:first"
 
     #[test]
     fn upgrade_reinstalls_current_bundle_when_an_older_bundled_version_matches_exactly() {
-        let current_bundle = RuntimeBundle::bundled().unwrap();
-        let older_bundle = RuntimeBundle::load_from_dir(
-            crate::runtime_bundle::bundled_runtime_root_dir().join("2026-06-17-screen-first.7"),
-        )
-        .unwrap();
+        let fixture = tempdir().unwrap();
+        write_runtime_fixture(
+            fixture.path(),
+            "current",
+            "2026-06-17-screen-first.8",
+            "return 'current draw'\n",
+        );
+        write_runtime_fixture(
+            fixture.path(),
+            "older",
+            "2026-06-17-screen-first.7",
+            "return 'older draw'\n",
+        );
+
+        let current_bundle = RuntimeBundle::load_from_dir(fixture.path().join("current")).unwrap();
+        let older_bundle = RuntimeBundle::load_from_dir(fixture.path().join("older")).unwrap();
+        let bundled_family = RuntimeBundle::load_family_from_dir(fixture.path()).unwrap();
         let mut accessor = RecordingSlotAccessor {
             persist_writes: true,
             ..Default::default()
@@ -1554,7 +1633,9 @@ runtime_marker = "fixture:first"
             );
         }
 
-        let report = upgrade_bundled_runtime(
+        let report = upgrade_runtime_bundle(
+            &current_bundle,
+            &bundled_family,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
             &mut accessor,
         )
