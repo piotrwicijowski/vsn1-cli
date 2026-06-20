@@ -32,7 +32,7 @@ use crate::transport::{SerialTransportFactory, SystemTransportFactory};
 
 pub use error::{Error, Result};
 
-const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install` to provision the bundled runtime before sending curated `screen` commands.";
+const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install` to provision the bundled runtime that the curated layered `screen` helpers expect.";
 const DEVICE_INFO_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --dx 0 --dy 0";
 const RUNTIME_INSTALL_AFTER_HELP: &str = "Installs the current bundled runtime into the manifest-owned slots only, then verifies an exact bundled match.";
@@ -489,21 +489,12 @@ where
     let target = resolve_target(target_args)?;
     let devices = discover_supported_devices(discovery)?;
     let device = select_single_device(&devices)?;
-
-    let report = {
-        let verify_transport =
-            transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
-        let mut reader = TransportRuntimeSlotReader::new(verify_transport)?;
-        verify_bundled_runtime(target, &mut reader)?
-    };
-
     let mut transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     send_screen_raw(&mut transport, target.grid_target(), lua)?;
 
     Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\nBundled runtime version: {}\nRuntime verification: exact bundled runtime match confirmed.\nSent {action} over the immediate path.\n",
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\nSent {action} over the immediate path.\n",
         protocol::GRID_BAUD_RATE,
-        report.bundle_version(),
     ))
 }
 
@@ -796,8 +787,6 @@ mod tests {
     use std::rc::Rc;
 
     use crate::device::{DeviceError, DiscoveredDevice};
-    use crate::protocol::GridTarget;
-    use crate::runtime_bundle::RuntimeBundle;
     use crate::transport::{
         FakeTransportFactory, OpenCall, SerialTransport, SerialTransportFactory, TransportError,
     };
@@ -1351,14 +1340,14 @@ mod tests {
     }
 
     #[test]
-    fn screen_set_requires_an_exact_runtime_match_before_sending() {
+    fn screen_set_sends_without_runtime_verification() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],
             error: None,
         };
         let mut transport_factory = FakeTransportFactory::default();
 
-        let error = execute_cli(
+        let output = execute_cli(
             Cli {
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Set {
@@ -1371,11 +1360,9 @@ mod tests {
             &discovery,
             &mut transport_factory,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("runtime verification failed: bundled runtime"));
+        assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
     }
 
@@ -1409,26 +1396,12 @@ mod tests {
     }
 
     #[test]
-    fn screen_set_drops_verification_transport_before_reopening_for_send() {
+    fn screen_set_opens_transport_once_and_sends_immediate_packet() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],
             error: None,
         };
-        let bundle = RuntimeBundle::bundled().unwrap();
-        let fetch_responses = bundle
-            .assets()
-            .iter()
-            .map(|asset| {
-                build_config_report_frame(
-                    GridTarget::new(0, 0),
-                    asset.slot.page,
-                    asset.slot.element,
-                    asset.slot.event,
-                    &asset.stored_content,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut transport_factory = SingleOpenTransportFactory::new(fetch_responses);
+        let mut transport_factory = SingleOpenTransportFactory::new(Vec::new());
 
         let output = execute_cli(
             Cli {
@@ -1448,8 +1421,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.contains("Runtime verification: exact bundled runtime match confirmed."));
-        assert_eq!(transport_factory.open_calls.len(), 2);
+        assert!(output.contains("Sent curated screen update over the immediate path."));
+        assert_eq!(transport_factory.open_calls.len(), 1);
         assert_eq!(transport_factory.immediate_writes().len(), 1);
     }
 
@@ -1463,49 +1436,5 @@ mod tests {
             product: Some("VSN1".to_string()),
             known_label: "Grid / VSN1",
         }
-    }
-
-    fn build_config_report_frame(
-        source_target: GridTarget,
-        page: u8,
-        element: u8,
-        event: u8,
-        content: &str,
-    ) -> Vec<u8> {
-        let mut class = vec![0x02];
-        class.extend_from_slice(b"060");
-        class.extend_from_slice(b"d");
-        class.extend_from_slice(b"010501");
-        write_ascii_hex(&mut class, 2, page as usize);
-        write_ascii_hex(&mut class, 2, element as usize);
-        write_ascii_hex(&mut class, 2, event as usize);
-        write_ascii_hex(&mut class, 4, content.len());
-        class.extend_from_slice(content.as_bytes());
-        class.push(0x03);
-
-        let mut frame = vec![0x01, 0x0f];
-        frame.extend_from_slice(b"0000");
-        frame.extend_from_slice(b"0101");
-        write_ascii_hex(&mut frame, 2, (source_target.dx + 127) as usize);
-        write_ascii_hex(&mut frame, 2, (source_target.dy + 127) as usize);
-        frame.extend_from_slice(b"00000000");
-        frame.push(0x17);
-        frame.extend_from_slice(&class);
-        frame.push(0x04);
-
-        let frame_length = frame.len();
-        overwrite_ascii_hex(&mut frame, 2, 4, frame_length);
-        let checksum = frame.iter().fold(0u8, |acc, byte| acc ^ byte);
-        write_ascii_hex(&mut frame, 2, checksum as usize);
-        frame.push(0x0a);
-        frame
-    }
-
-    fn write_ascii_hex(buffer: &mut Vec<u8>, width: usize, value: usize) {
-        buffer.extend_from_slice(format!("{value:0width$x}").as_bytes());
-    }
-
-    fn overwrite_ascii_hex(buffer: &mut [u8], offset: usize, width: usize, value: usize) {
-        buffer[offset..offset + width].copy_from_slice(format!("{value:0width$x}").as_bytes());
     }
 }

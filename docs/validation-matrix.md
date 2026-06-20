@@ -18,7 +18,7 @@
 - Reliable visible screen updates are currently budgeted at about `5-10` updates per second depending on payload shape.
 - The fast live path requires framed `IMMEDIATE` Lua payloads in the form `<?lua --[[@cb]] ... ?>`.
 - The current validated runtime contract owns only the LCD init and LCD draw slots identified in the POC.
-- Curated screen commands are intentionally strict and require an exact bundled runtime match before they send live updates.
+- Curated screen commands now take the same fast immediate-send path as `screen raw`; runtime lifecycle commands remain available to provision and verify the bundled layered runtime separately.
 
 ## Follow-Up Recording Rules
 

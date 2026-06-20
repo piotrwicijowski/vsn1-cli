@@ -9,7 +9,7 @@ This project is intentionally screen-first and one-shot only. The CLI provisions
 - Linux is the primary validated host today.
 - macOS support is a target, but host-side validation is still in progress.
 - Curated public commands are grouped under `device`, `runtime`, and `screen`.
-- Curated screen mutations require an exact bundled runtime match first.
+- Curated screen mutations use the bundled layered runtime shape when it is installed.
 
 ## Install And Build
 
@@ -140,7 +140,8 @@ Current curated fields:
 
 ## Runtime Compatibility Rules
 
-- Curated `screen set`, `screen clear`, and `screen activate` commands fail unless the owned slots exactly match the current bundled runtime.
+- Curated `screen set`, `screen clear`, and `screen activate` commands send immediate runtime-helper Lua without a preflight exact-match verification step.
+- `runtime install` remains the supported way to provision the bundled layered runtime that those curated helpers target.
 - `screen raw` bypasses curated field validation and runtime-shape compilation, but still uses the same transport and packet framing path.
 - Runtime lifecycle commands only touch the manifest-owned slots.
 
