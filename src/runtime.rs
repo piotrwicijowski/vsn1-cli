@@ -106,15 +106,17 @@ pub struct RuntimeInstallReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeUpgradeReport {
-    previous_bundle_version: String,
     install_report: RuntimeInstallReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeRemoveReport {
     removed_slots: Vec<OwnedRuntimeSlot>,
+    restored_from_backup: bool,
+    warning: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeLifecycleState {
     ExactCurrent,
@@ -332,10 +334,6 @@ impl RuntimeInstallReport {
 }
 
 impl RuntimeUpgradeReport {
-    pub fn previous_bundle_version(&self) -> &str {
-        &self.previous_bundle_version
-    }
-
     pub fn install_report(&self) -> &RuntimeInstallReport {
         &self.install_report
     }
@@ -344,6 +342,14 @@ impl RuntimeUpgradeReport {
 impl RuntimeRemoveReport {
     pub fn removed_slots(&self) -> &[OwnedRuntimeSlot] {
         &self.removed_slots
+    }
+
+    pub fn restored_from_backup(&self) -> bool {
+        self.restored_from_backup
+    }
+
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
     }
 }
 
@@ -669,6 +675,27 @@ where
     install_runtime_bundle_with_storage(&bundle, requested_target, reader, &storage_root, true)
 }
 
+pub fn upgrade_runtime_with_bundle_dir<R>(
+    bundle_dir: impl AsRef<Path>,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeUpgradeReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
+    let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
+    let storage_root = required_runtime_config_root_dir()?;
+    let install_report = install_runtime_bundle_with_storage(
+        &bundle,
+        requested_target,
+        reader,
+        &storage_root,
+        false,
+    )?;
+
+    Ok(RuntimeUpgradeReport { install_report })
+}
+
 pub fn upgrade_bundled_runtime<R>(
     requested_target: ResolvedTarget,
     reader: &mut R,
@@ -676,19 +703,14 @@ pub fn upgrade_bundled_runtime<R>(
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
 {
-    let current_bundle = RuntimeBundle::bundled()?;
-    let bundled_family = RuntimeBundle::load_bundled_family()?;
-    let storage_root = required_runtime_config_root_dir()?;
-
-    upgrade_runtime_bundle(
-        &current_bundle,
-        &bundled_family,
+    upgrade_runtime_with_bundle_dir(
+        crate::runtime_bundle::bundled_runtime_dir(),
         requested_target,
         reader,
-        Some(storage_root.as_path()),
     )
 }
 
+#[allow(dead_code)]
 fn upgrade_runtime_bundle<R>(
     current_bundle: &RuntimeBundle,
     bundled_family: &[RuntimeBundle],
@@ -720,10 +742,8 @@ where
                 )?,
                 None => install_runtime_bundle(current_bundle, requested_target, reader)?,
             };
-            Ok(RuntimeUpgradeReport {
-                previous_bundle_version: bundle_version,
-                install_report,
-            })
+            let _ = bundle_version;
+            Ok(RuntimeUpgradeReport { install_report })
         }
         RuntimeLifecycleState::Missing => Err(RuntimeError::verification_failed(
             "no managed bundled runtime content was detected in the owned slots; use `runtime install` for a fresh provision",
@@ -741,19 +761,58 @@ pub fn repair_bundled_runtime<R>(
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
 {
-    let current_bundle = RuntimeBundle::bundled()?;
-    let bundled_family = RuntimeBundle::load_bundled_family()?;
-    let storage_root = required_runtime_config_root_dir()?;
-
-    repair_runtime_bundle(
-        &current_bundle,
-        &bundled_family,
-        requested_target,
-        reader,
-        Some(storage_root.as_path()),
-    )
+    repair_installed_runtime(requested_target, reader)
 }
 
+pub fn repair_installed_runtime<R>(
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeInstallReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
+    let storage_root = required_runtime_config_root_dir()?;
+    repair_installed_runtime_with_storage(&storage_root, requested_target, reader)
+}
+
+fn repair_installed_runtime_with_storage<R>(
+    storage_root: &Path,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeInstallReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
+    let installed_dir = installed_runtime_dir_from_root(storage_root);
+    if !installed_dir.is_dir() {
+        return Err(RuntimeError::verification_failed(
+            "no frozen installed runtime was found under ~/.config/vsn1-cli/runtime",
+        ));
+    }
+
+    let bundle = RuntimeBundle::load_from_dir(&installed_dir)?;
+    let report = inspect_runtime_bundle(&bundle, requested_target, reader)?;
+    if report.is_exact_match() {
+        return Err(RuntimeError::verification_failed(format!(
+            "installed runtime {} is already installed exactly; runtime repair is only for drifted or partial managed content",
+            bundle.manifest().bundle_version
+        )));
+    }
+
+    if report
+        .slot_inspections()
+        .iter()
+        .all(|inspection| matches!(inspection.status, RuntimeSlotStatus::Missing))
+    {
+        return Err(RuntimeError::verification_failed(
+            "no installed runtime content was detected in the owned slots; use `runtime install <name>` for a fresh provision",
+        ));
+    }
+
+    install_runtime_bundle_with_storage(&bundle, requested_target, reader, storage_root, false)
+}
+
+#[allow(dead_code)]
 fn repair_runtime_bundle<R>(
     current_bundle: &RuntimeBundle,
     bundled_family: &[RuntimeBundle],
@@ -795,36 +854,57 @@ pub fn remove_bundled_runtime<R>(
     reader: &mut R,
 ) -> Result<RuntimeRemoveReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer + RuntimeSlotWriter,
 {
-    let bundle = RuntimeBundle::bundled()?;
-    let bundled_family = RuntimeBundle::load_bundled_family()?;
-    let managed_hashes = managed_slot_hashes_for_bundle(&bundle, &bundled_family)?;
-    let removable_slots = plan_runtime_remove(&bundle, &managed_hashes, requested_target, reader)?;
+    remove_installed_runtime(requested_target, reader)
+}
 
-    if removable_slots.is_empty() {
-        return Err(RuntimeError::verification_failed(
-            "no managed bundled runtime content was present in the owned slots; nothing was removed",
-        ));
-    }
+pub fn remove_installed_runtime<R>(
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeRemoveReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer + RuntimeSlotWriter,
+{
+    let storage_root = required_runtime_config_root_dir()?;
+    remove_installed_runtime_with_storage(&storage_root, requested_target, reader)
+}
 
-    let mut stored_pages = Vec::new();
-    for slot in &removable_slots {
-        if !stored_pages.contains(&slot.page) {
-            stored_pages.push(slot.page);
-        }
-        reader.clear_owned_slot(requested_target, slot)?;
-    }
+fn remove_installed_runtime_with_storage<R>(
+    storage_root: &Path,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeRemoveReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer + RuntimeSlotWriter,
+{
+    let installed_dir = installed_runtime_dir_from_root(storage_root);
+    let pre_install_dir = pre_install_runtime_dir_from_root(storage_root);
 
-    for page in stored_pages {
-        reader.store_page(requested_target, page)?;
-    }
+    let restore_attempt = if pre_install_dir.is_dir() {
+        Some(RuntimeBundle::load_from_dir(&pre_install_dir))
+    } else {
+        None
+    };
 
-    verify_removed_slots(requested_target, &removable_slots, reader)?;
+    let report = match restore_attempt {
+        Some(Ok(bundle)) => restore_runtime_bundle(&bundle, requested_target, reader)?,
+        Some(Err(_)) => clear_installed_runtime_with_warning(
+            &installed_dir,
+            requested_target,
+            reader,
+            "pre-install backup was unavailable or incomplete; owned slots were cleared instead of restored",
+        )?,
+        None => clear_installed_runtime_with_warning(
+            &installed_dir,
+            requested_target,
+            reader,
+            "pre-install backup was unavailable or incomplete; owned slots were cleared instead of restored",
+        )?,
+    };
 
-    Ok(RuntimeRemoveReport {
-        removed_slots: removable_slots,
-    })
+    remove_directory_if_exists(&installed_dir)?;
+    Ok(report)
 }
 
 fn install_runtime_bundle<R>(
@@ -864,6 +944,66 @@ where
             .map(|asset| asset.slot.clone())
             .collect(),
         verification_report,
+    })
+}
+
+fn restore_runtime_bundle<R>(
+    bundle: &RuntimeBundle,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeRemoveReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+{
+    let report = install_runtime_bundle(bundle, requested_target, reader)?;
+
+    Ok(RuntimeRemoveReport {
+        removed_slots: report.installed_slots().to_vec(),
+        restored_from_backup: true,
+        warning: None,
+    })
+}
+
+fn clear_installed_runtime_with_warning<R>(
+    installed_dir: &Path,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+    warning: &str,
+) -> Result<RuntimeRemoveReport>
+where
+    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer,
+{
+    if !installed_dir.is_dir() {
+        return Err(RuntimeError::verification_failed(
+            "no frozen installed runtime was found under ~/.config/vsn1-cli/runtime, so owned slots could not be restored or cleared",
+        ));
+    }
+
+    let bundle = RuntimeBundle::load_from_dir(installed_dir)?;
+    let mut stored_pages = Vec::new();
+
+    for asset in bundle.assets() {
+        if !stored_pages.contains(&asset.slot.page) {
+            stored_pages.push(asset.slot.page);
+        }
+        reader.clear_owned_slot(requested_target, &asset.slot)?;
+    }
+
+    for page in stored_pages {
+        reader.store_page(requested_target, page)?;
+    }
+
+    let removed_slots = bundle
+        .assets()
+        .iter()
+        .map(|asset| asset.slot.clone())
+        .collect::<Vec<_>>();
+    verify_removed_slots(requested_target, &removed_slots, reader)?;
+
+    Ok(RuntimeRemoveReport {
+        removed_slots,
+        restored_from_backup: false,
+        warning: Some(warning.to_string()),
     })
 }
 
@@ -1054,6 +1194,7 @@ fn staging_dir_for(path: &Path) -> PathBuf {
     path.with_extension("tmp")
 }
 
+#[allow(dead_code)]
 fn classify_runtime_lifecycle_state<R>(
     current_bundle: &RuntimeBundle,
     bundled_family: &[RuntimeBundle],
@@ -1091,6 +1232,7 @@ where
     Ok(RuntimeLifecycleState::DriftedOrIncomplete)
 }
 
+#[allow(dead_code)]
 fn managed_slot_hashes_for_bundle(
     bundle: &RuntimeBundle,
     bundled_family: &[RuntimeBundle],
@@ -1151,6 +1293,7 @@ fn managed_slot_hashes_for_bundle(
         .collect())
 }
 
+#[allow(dead_code)]
 fn plan_runtime_remove<R>(
     bundle: &RuntimeBundle,
     managed_hashes: &BTreeMap<String, Vec<String>>,
@@ -1726,11 +1869,10 @@ mod tests {
         RuntimeBundle::load_from_dir(pre_install_runtime_dir_from_root(root)).unwrap()
     }
 
-    fn write_runtime_fixture(root: &Path, name: &str, bundle_version: &str, draw_content: &str) {
-        let runtime_root = root.join(name);
+    fn write_runtime_bundle_dir(runtime_root: &Path, bundle_version: &str, draw_content: &str) {
         let init_content = "return 'init'\n";
 
-        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(runtime_root).unwrap();
         fs::write(runtime_root.join("lcd-init.lua"), init_content).unwrap();
         fs::write(runtime_root.join("lcd-draw.lua"), draw_content).unwrap();
         fs::write(
@@ -1762,6 +1904,10 @@ runtime_marker = "fixture:lcd-draw"
             ),
         )
         .unwrap();
+    }
+
+    fn write_runtime_fixture(root: &Path, name: &str, bundle_version: &str, draw_content: &str) {
+        write_runtime_bundle_dir(&root.join(name), bundle_version, draw_content);
     }
 
     #[test]
@@ -2073,8 +2219,9 @@ runtime_marker = "fixture:first"
     }
 
     #[test]
-    fn upgrade_reinstalls_current_bundle_when_an_older_bundled_version_matches_exactly() {
+    fn upgrade_overwrites_device_without_refreshing_pre_install_backup() {
         let fixture = tempdir().unwrap();
+        let storage = tempdir().unwrap();
         write_runtime_fixture(
             fixture.path(),
             "current",
@@ -2090,7 +2237,6 @@ runtime_marker = "fixture:first"
 
         let current_bundle = RuntimeBundle::load_from_dir(fixture.path().join("current")).unwrap();
         let older_bundle = RuntimeBundle::load_from_dir(fixture.path().join("older")).unwrap();
-        let bundled_family = RuntimeBundle::load_family_from_dir(fixture.path()).unwrap();
         let mut accessor = RecordingSlotAccessor {
             persist_writes: true,
             ..Default::default()
@@ -2106,19 +2252,22 @@ runtime_marker = "fixture:first"
             );
         }
 
-        let report = upgrade_runtime_bundle(
-            &current_bundle,
-            &bundled_family,
-            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &mut accessor,
-            Some(fixture.path().join("config").as_path()),
+        fs::create_dir_all(pre_install_runtime_dir_from_root(storage.path())).unwrap();
+        fs::write(
+            pre_install_runtime_dir_from_root(storage.path()).join("sentinel.txt"),
+            "keep",
         )
         .unwrap();
 
-        assert_eq!(
-            report.previous_bundle_version(),
-            "2026-06-17-screen-first.7"
-        );
+        let report = install_runtime_bundle_with_storage(
+            &current_bundle,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+            storage.path(),
+            false,
+        )
+        .unwrap();
+
         assert_eq!(
             accessor.write_order(),
             &current_bundle
@@ -2128,25 +2277,27 @@ runtime_marker = "fixture:first"
                 .collect::<Vec<_>>()
         );
         assert_eq!(accessor.stored_pages(), &[0]);
-        assert!(report
-            .install_report()
-            .verification_report()
-            .is_exact_match());
-        let installed_bundle = RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(
-            &fixture.path().join("config"),
-        ))
-        .unwrap();
+        assert!(report.verification_report().is_exact_match());
+        let installed_bundle =
+            RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(storage.path())).unwrap();
         assert_eq!(
             installed_bundle.manifest().bundle_version,
             current_bundle.manifest().bundle_version
         );
-        assert!(!pre_install_runtime_dir_from_root(&fixture.path().join("config")).exists());
+        assert!(pre_install_runtime_dir_from_root(storage.path())
+            .join("sentinel.txt")
+            .exists());
     }
 
     #[test]
     fn repair_reinstalls_current_bundle_when_owned_slots_are_drifted_or_missing() {
         let fixture = tempdir().unwrap();
         let bundle = RuntimeBundle::bundled().unwrap();
+        replace_directory_copy(
+            bundle.root(),
+            &installed_runtime_dir_from_root(fixture.path()),
+        )
+        .unwrap();
         let mut accessor = RecordingSlotAccessor {
             persist_writes: true,
             ..Default::default()
@@ -2170,13 +2321,10 @@ runtime_marker = "fixture:first"
             }
         }
 
-        let bundled_family = RuntimeBundle::load_bundled_family().unwrap();
-        let report = repair_runtime_bundle(
-            &bundle,
-            &bundled_family,
+        let report = repair_installed_runtime_with_storage(
+            fixture.path(),
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
             &mut accessor,
-            Some(fixture.path()),
         )
         .unwrap();
 
@@ -2239,8 +2387,69 @@ runtime_marker = "fixture:first"
     }
 
     #[test]
-    fn remove_clears_owned_slots_when_they_match_a_managed_bundle_version() {
+    fn remove_restores_pre_install_backup_when_available() {
+        let fixture = tempdir().unwrap();
         let bundle = RuntimeBundle::bundled().unwrap();
+        write_runtime_bundle_dir(
+            &installed_runtime_dir_from_root(fixture.path()),
+            &bundle.manifest().bundle_version,
+            "return 'installed draw'\n",
+        );
+        write_runtime_bundle_dir(
+            &pre_install_runtime_dir_from_root(fixture.path()),
+            "pre-install-backup",
+            "return 'backup draw'\n",
+        );
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        for asset in bundle.assets() {
+            accessor.slots.insert(
+                asset.slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content: asset.stored_content.clone(),
+                },
+            );
+        }
+
+        let report = remove_installed_runtime_with_storage(
+            fixture.path(),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            accessor.write_order(),
+            &bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(accessor.clear_order().is_empty());
+        assert_eq!(accessor.stored_pages(), &[0]);
+        assert_eq!(report.removed_slots().len(), bundle.assets().len());
+        assert!(report.restored_from_backup());
+        assert_eq!(report.warning(), None);
+        assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
+        assert!(accessor.slots.values().any(
+            |slot| slot.content == normalize_text_content(&frame_lua("return 'backup draw'\n"))
+        ));
+    }
+
+    #[test]
+    fn remove_clears_owned_slots_with_warning_when_backup_is_missing() {
+        let fixture = tempdir().unwrap();
+        let bundle = RuntimeBundle::bundled().unwrap();
+        write_runtime_bundle_dir(
+            &installed_runtime_dir_from_root(fixture.path()),
+            &bundle.manifest().bundle_version,
+            "return 'installed draw'\n",
+        );
         let mut accessor = RecordingSlotAccessor::default();
 
         for asset in bundle.assets() {
@@ -2253,12 +2462,18 @@ runtime_marker = "fixture:first"
             );
         }
 
-        let report = remove_bundled_runtime(
+        let report = remove_installed_runtime_with_storage(
+            fixture.path(),
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
             &mut accessor,
         )
         .unwrap();
 
+        assert!(!report.restored_from_backup());
+        assert!(report
+            .warning()
+            .unwrap()
+            .contains("pre-install backup was unavailable or incomplete"));
         assert_eq!(
             accessor.clear_order(),
             &bundle
@@ -2268,44 +2483,10 @@ runtime_marker = "fixture:first"
                 .collect::<Vec<_>>()
         );
         assert_eq!(accessor.stored_pages(), &[0]);
-        assert_eq!(report.removed_slots().len(), bundle.assets().len());
+        assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
         assert!(accessor
             .slots
             .values()
             .all(|slot| normalized_sha256(&slot.content) == normalized_sha256(&frame_lua(""))));
-    }
-
-    #[test]
-    fn remove_refuses_to_clear_unmanaged_slot_content() {
-        let bundle = RuntimeBundle::bundled().unwrap();
-        let mut accessor = RecordingSlotAccessor::default();
-
-        for asset in bundle.assets() {
-            let content = if asset.slot.name == "lcd-draw" {
-                normalize_text_content(&frame_lua("return 'user script'\n"))
-            } else {
-                asset.stored_content.clone()
-            };
-
-            accessor.slots.insert(
-                asset.slot.name.clone(),
-                RuntimeSlotRead {
-                    source_target: GridTarget::new(0, 0),
-                    content,
-                },
-            );
-        }
-
-        let error = remove_bundled_runtime(
-            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &mut accessor,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains(
-            "refusing to remove lcd-draw at page=0 element=13 event=8 because its current content does not match any bundled managed runtime version"
-        ));
-        assert!(accessor.clear_order().is_empty());
-        assert!(accessor.stored_pages().is_empty());
     }
 }

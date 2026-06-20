@@ -15,10 +15,10 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 - Overall status: `in_progress`
 - Last completed step: `step 14`
 - In-progress step: `step 15`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-20 after step 14 storage work added frozen-runtime persistence, pre-install backup capture, replacement semantics, and regression coverage for backup/install/upgrade/repair persistence)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-20 after step 15 software work switched runtime install/upgrade to named runtime selection, changed remove/uninstall to backup-restore-or-clear semantics, and added command/lifecycle regression coverage)`
 - Last hardware validation: `2026-06-20 on Linux host: step 13 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install succeeded, the frozen runtime copy under ~/.config/vsn1-cli/runtime matched via runtime status and runtime verify after manual seeding, an out-of-band lcd-draw modification surfaced as a status content mismatch and a verify failure against installed runtime 2026-06-17-screen-first.8, and removing the frozen local runtime copy produced the expected status/verify no-installed-runtime diagnostics.`
-- Open blockers: `none`
-- Next session start point: `step 15 - change runtime install/upgrade/remove/uninstall command semantics around runtime names, backup restore, and fallback-to-clear behavior`
+- Open blockers: `step 15 hardware validation still pending`
+- Next session start point: `finish step 15 with hardware validation for named install/upgrade and remove/uninstall restore-or-clear behavior, then begin step 16`
 
 ## Rules for every step
 
@@ -170,14 +170,14 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 
 ### Step 15: Rework runtime install, upgrade, remove, and uninstall semantics
 
-- [ ] Change `runtime install` to require a runtime name and refresh the pre-install backup.
-- [ ] Change `runtime upgrade` to require a runtime name and skip backup refresh.
-- [ ] Make `runtime remove` restore from backup when present.
-- [ ] Add `runtime uninstall` as an alias of `runtime remove`.
-- [ ] When backup data is missing or incomplete, clear owned slots, print a warning, and continue cleanup.
-- [ ] Add unit tests for install-name resolution, upgrade-without-backup-refresh, backup-restore removal, and fallback-to-clear removal.
+- [x] Change `runtime install` to require a runtime name and refresh the pre-install backup.
+- [x] Change `runtime upgrade` to require a runtime name and skip backup refresh.
+- [x] Make `runtime remove` restore from backup when present.
+- [x] Add `runtime uninstall` as an alias of `runtime remove`.
+- [x] When backup data is missing or incomplete, clear owned slots, print a warning, and continue cleanup.
+- [x] Add unit tests for install-name resolution, upgrade-without-backup-refresh, backup-restore removal, and fallback-to-clear removal.
 - [ ] Hardware gate: confirm install, upgrade, uninstall-with-restore, and uninstall-fallback-to-clear on a real device.
-- [ ] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
+- [x] Verify: `cargo fmt --check`, `cargo test`, `cargo check`.
 
 ### Step 16: Reconnect curated screen behavior and docs to the frozen runtime model
 
