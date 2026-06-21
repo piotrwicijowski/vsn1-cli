@@ -1,12 +1,32 @@
-bundle_version = "2026-06-17-screen-first.6"
+bundle_version = "2026-06-21-manifest-layers.1"
 compatibility_reference = "POC-confirmed LCD owned slots at page 0 / element 13 / events 0 and 8, with live IMMEDIATE calls framed as <?lua ... ?>"
-runtime_marker = "vsn1-cli:2026-06-17-screen-first.6"
+runtime_marker = "vsn1-cli:2026-06-21-manifest-layers.1"
 
 compatibility_notes = [
   "This bundled contract owns only the LCD init and LCD draw slots discovered in the validated POC.",
   "The stored state shape is grounded in the confirmed update_param(...) argument layout plus the layered field names accepted by the plan.",
-  "This revision keeps the brightness fix and makes temporary-layer rendering use literal RGB colors instead of palette globals so overlay visuals stay deterministic."
+  "This revision keeps the confirmed persistent/slow/fast visuals while rewriting the stored runtime helper contract to generic set_field(layer,key,value) and activate_layer(layer) entrypoints backed by manifest-declared layer state."
 ]
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+notes = "Primary long-lived content layer."
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+timeout_ms = 5000
+notes = "Medium-priority notification layer."
+
+[[layers]]
+name = "fast"
+priority = 20
+activation = "temporary"
+timeout_ms = 1000
+notes = "High-priority transient reaction layer."
 
 [[owned_slots]]
 name = "lcd-init"
@@ -15,8 +35,7 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-normalized_sha256 = "1dc254e842e31d52cfa73190f97ba1aef9b977515c607e432f92e3b296f1288a"
-runtime_marker = "vsn1-cli:2026-06-17-screen-first.6:lcd-init"
+runtime_marker = "vsn1-cli:2026-06-21-manifest-layers.1:lcd-init"
 
 [[owned_slots]]
 name = "lcd-draw"
@@ -25,8 +44,7 @@ element = 13
 event = 8
 asset = "lcd-draw.lua"
 install_order = 20
-normalized_sha256 = "4b79ddea5509b2423eb524983c40db56124d066a0d82a476bdb82f5b1fd2b790"
-runtime_marker = "vsn1-cli:2026-06-17-screen-first.6:lcd-draw"
+runtime_marker = "vsn1-cli:2026-06-21-manifest-layers.1:lcd-draw"
 
 [[fields]]
 name = "persistent.title"

@@ -1,45 +1,29 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
 
-pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-17-screen-first.8";
+pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-21-manifest-layers.1";
+pub const BUNDLED_RUNTIME_NAME: &str = "default";
 
-const BUNDLED_RUNTIME_ROOT: &str = "assets/runtime";
+const BUNDLED_RUNTIME_ROOT: &str = "assets/runtimes";
+const SYSTEM_RUNTIME_ROOT: &str = "/usr/share/vsn1-cli/runtimes";
 const MANIFEST_FILE_NAME: &str = "manifest.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeBundleError {
-    ReadManifest {
-        path: PathBuf,
-        message: String,
-    },
-    ReadBundleRoot {
-        path: PathBuf,
-        message: String,
-    },
-    ParseManifest {
-        path: PathBuf,
-        message: String,
-    },
-    ReadAsset {
-        path: PathBuf,
-        message: String,
-    },
-    InvalidManifest {
-        message: String,
-    },
-    AssetHashMismatch {
-        asset: String,
-        expected: String,
-        actual: String,
-    },
+    ReadManifest { path: PathBuf, message: String },
+    ReadBundleRoot { path: PathBuf, message: String },
+    ParseManifest { path: PathBuf, message: String },
+    ReadAsset { path: PathBuf, message: String },
+    InvalidManifest { message: String },
+    RuntimeNotFound { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +33,26 @@ pub struct RuntimeBundle {
     assets: Vec<RuntimeAsset>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeSource {
+    System,
+    User,
+    Dev,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRoot {
+    pub source: RuntimeSource,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredRuntime {
+    pub name: String,
+    pub source: RuntimeSource,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RuntimeBundleManifest {
     pub bundle_version: String,
@@ -56,9 +60,28 @@ pub struct RuntimeBundleManifest {
     pub runtime_marker: String,
     #[serde(default)]
     pub compatibility_notes: Vec<String>,
+    pub layers: Vec<RuntimeLayerSpec>,
     pub owned_slots: Vec<OwnedRuntimeSlot>,
     #[serde(default)]
     pub fields: Vec<RuntimeFieldSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeLayerSpec {
+    pub name: String,
+    pub priority: u32,
+    pub activation: RuntimeLayerActivation,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeLayerActivation {
+    Persistent,
+    Temporary,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -69,7 +92,6 @@ pub struct OwnedRuntimeSlot {
     pub event: u8,
     pub asset: String,
     pub install_order: u32,
-    pub normalized_sha256: String,
     pub runtime_marker: String,
 }
 
@@ -124,14 +146,7 @@ impl fmt::Display for RuntimeBundleError {
                 )
             }
             Self::InvalidManifest { message } => write!(f, "invalid runtime manifest: {message}"),
-            Self::AssetHashMismatch {
-                asset,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "runtime asset hash mismatch for {asset}: expected {expected}, got {actual}"
-            ),
+            Self::RuntimeNotFound { name } => write!(f, "runtime `{name}` was not found"),
         }
     }
 }
@@ -144,7 +159,11 @@ impl RuntimeBundle {
     }
 
     pub fn load_bundled_family() -> Result<Vec<Self>> {
-        let root = bundled_runtime_root_dir();
+        Self::load_family_from_dir(bundled_runtime_root_dir())
+    }
+
+    pub fn load_family_from_dir(path: impl AsRef<Path>) -> Result<Vec<Self>> {
+        let root = path.as_ref().to_path_buf();
         let entries = fs::read_dir(&root).map_err(|error| RuntimeBundleError::ReadBundleRoot {
             path: root.clone(),
             message: error.to_string(),
@@ -226,14 +245,131 @@ impl OwnedRuntimeSlot {
     }
 }
 
+impl RuntimeSource {
+    fn priority(self) -> u8 {
+        match self {
+            Self::System => 0,
+            Self::User => 1,
+            Self::Dev => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Dev => "dev",
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, RuntimeBundleError>;
 
 pub fn bundled_runtime_dir() -> PathBuf {
-    bundled_runtime_root_dir().join(BUNDLED_RUNTIME_VERSION)
+    bundled_runtime_root_dir().join(BUNDLED_RUNTIME_NAME)
 }
 
 pub fn bundled_runtime_root_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLED_RUNTIME_ROOT)
+}
+
+pub fn system_runtime_root_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_RUNTIME_ROOT)
+}
+
+pub fn user_runtime_root_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/share/vsn1-cli/runtimes"))
+}
+
+pub fn runtime_roots() -> Vec<RuntimeRoot> {
+    let mut roots = Vec::new();
+
+    let system_root = system_runtime_root_dir();
+    if system_root.is_dir() {
+        roots.push(RuntimeRoot {
+            source: RuntimeSource::System,
+            path: system_root,
+        });
+    }
+
+    if let Some(user_root) = user_runtime_root_dir().filter(|root| root.is_dir()) {
+        roots.push(RuntimeRoot {
+            source: RuntimeSource::User,
+            path: user_root,
+        });
+    }
+
+    let dev_root = bundled_runtime_root_dir();
+    if dev_root.is_dir() {
+        roots.push(RuntimeRoot {
+            source: RuntimeSource::Dev,
+            path: dev_root,
+        });
+    }
+
+    roots
+}
+
+pub fn discover_runtimes() -> Result<Vec<DiscoveredRuntime>> {
+    discover_runtimes_in_roots(&runtime_roots())
+}
+
+pub fn resolve_runtime(name: &str) -> Result<DiscoveredRuntime> {
+    discover_runtimes()?
+        .into_iter()
+        .find(|runtime| runtime.name == name)
+        .ok_or_else(|| RuntimeBundleError::RuntimeNotFound {
+            name: name.to_string(),
+        })
+}
+
+fn discover_runtimes_in_roots(roots: &[RuntimeRoot]) -> Result<Vec<DiscoveredRuntime>> {
+    let mut runtimes = BTreeMap::<String, DiscoveredRuntime>::new();
+
+    for root in roots {
+        if !root.path.exists() {
+            continue;
+        }
+
+        let entries =
+            fs::read_dir(&root.path).map_err(|error| RuntimeBundleError::ReadBundleRoot {
+                path: root.path.clone(),
+                message: error.to_string(),
+            })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|error| RuntimeBundleError::ReadBundleRoot {
+                path: root.path.clone(),
+                message: error.to_string(),
+            })?;
+            let path = entry.path();
+            if !path.is_dir() || !path.join(MANIFEST_FILE_NAME).is_file() {
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            let candidate = DiscoveredRuntime {
+                name: name.to_string(),
+                source: root.source,
+                path: path.clone(),
+            };
+
+            match runtimes.get(name) {
+                Some(existing) if existing.source.priority() >= candidate.source.priority() => {}
+                _ => {
+                    runtimes.insert(name.to_string(), candidate);
+                }
+            }
+        }
+    }
+
+    Ok(runtimes.into_values().collect())
 }
 
 pub fn normalize_text_content(content: &str) -> String {
@@ -258,6 +394,8 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
         });
     }
 
+    validate_layers(manifest)?;
+
     if manifest.owned_slots.is_empty() {
         return Err(RuntimeBundleError::InvalidManifest {
             message: "owned_slots must not be empty".to_string(),
@@ -278,22 +416,13 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
                 message: format!("duplicate owned slot location {}", slot.location_display()),
             });
         }
-
-        if slot.normalized_sha256.len() != 64
-            || !slot
-                .normalized_sha256
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        {
-            return Err(RuntimeBundleError::InvalidManifest {
-                message: format!(
-                    "owned slot {} has an invalid normalized_sha256 value",
-                    slot.name
-                ),
-            });
-        }
     }
 
+    let declared_layers = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.name.as_str())
+        .collect::<HashSet<_>>();
     let mut field_names = HashSet::new();
     for field in &manifest.fields {
         if !field_names.insert(field.name.clone()) {
@@ -301,9 +430,73 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
                 message: format!("duplicate field inventory entry {}", field.name),
             });
         }
+
+        if !declared_layers.contains(field.layer.as_str()) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!(
+                    "field {} references undeclared layer {}",
+                    field.name, field.layer
+                ),
+            });
+        }
     }
 
     Ok(())
+}
+
+fn validate_layers(manifest: &RuntimeBundleManifest) -> Result<()> {
+    let mut layer_names = HashSet::new();
+    let mut priorities = HashSet::new();
+    let mut persistent_layer_count = 0usize;
+
+    for layer in &manifest.layers {
+        if layer.name.trim().is_empty() {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: "layer name must not be empty".to_string(),
+            });
+        }
+
+        if !layer_names.insert(layer.name.clone()) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!("duplicate layer name {}", layer.name),
+            });
+        }
+
+        if !priorities.insert(layer.priority) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!("duplicate layer priority {}", layer.priority),
+            });
+        }
+
+        match layer.activation {
+            RuntimeLayerActivation::Persistent => {
+                persistent_layer_count += 1;
+                if layer.timeout_ms.is_some() {
+                    return Err(RuntimeBundleError::InvalidManifest {
+                        message: format!(
+                            "persistent layer {} must not define timeout_ms",
+                            layer.name
+                        ),
+                    });
+                }
+            }
+            RuntimeLayerActivation::Temporary => {
+                if layer.timeout_ms.is_none() {
+                    return Err(RuntimeBundleError::InvalidManifest {
+                        message: format!("temporary layer {} must define timeout_ms", layer.name),
+                    });
+                }
+            }
+        }
+    }
+
+    if persistent_layer_count == 0 {
+        Err(RuntimeBundleError::InvalidManifest {
+            message: "at least one persistent layer must be declared".to_string(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsset> {
@@ -317,14 +510,6 @@ fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsse
     validate_installable_script_length(&slot, &normalized_content)?;
     let stored_content = normalize_text_content(&frame_lua(&normalized_content));
     let actual_hash = sha256_hex(stored_content.as_bytes());
-
-    if actual_hash != slot.normalized_sha256 {
-        return Err(RuntimeBundleError::AssetHashMismatch {
-            asset: slot.asset.clone(),
-            expected: slot.normalized_sha256.clone(),
-            actual: actual_hash,
-        });
-    }
 
     Ok(RuntimeAsset {
         slot,
@@ -385,10 +570,43 @@ mod tests {
 
     use tempfile::tempdir;
 
+    fn write_fixture_runtime(root: &Path, name: &str, bundle_version: &str) {
+        let runtime_root = root.join(name);
+        let content = "return 1\n";
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::write(runtime_root.join("lcd-init.lua"), content).unwrap();
+        fs::write(
+            runtime_root.join("manifest.toml"),
+            format!(
+                r#"
+bundle_version = "{bundle_version}"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn bundled_runtime_manifest_and_assets_load() {
         let bundle = RuntimeBundle::bundled().unwrap();
 
+        assert_eq!(bundle.root(), bundled_runtime_dir().as_path());
         assert_eq!(bundle.manifest().bundle_version, BUNDLED_RUNTIME_VERSION);
         assert_eq!(bundle.assets().len(), 2);
         assert_eq!(bundle.assets()[0].slot.name, "lcd-init");
@@ -398,6 +616,40 @@ mod tests {
             .fields
             .iter()
             .any(|field| field.name == "fast.action"));
+        assert_eq!(
+            bundle
+                .manifest()
+                .layers
+                .iter()
+                .map(|layer| layer.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["persistent", "slow", "fast"]
+        );
+    }
+
+    #[test]
+    fn bundled_runtime_uses_generic_layer_helpers_within_config_limit() {
+        let bundle = RuntimeBundle::bundled().unwrap();
+        let init = bundle
+            .assets()
+            .iter()
+            .find(|asset| asset.slot.name == "lcd-init")
+            .unwrap();
+        let draw = bundle
+            .assets()
+            .iter()
+            .find(|asset| asset.slot.name == "lcd-draw")
+            .unwrap();
+
+        assert!(init.normalized_content.contains("function set_field("));
+        assert!(init.normalized_content.contains("function activate_layer("));
+        assert!(!init.normalized_content.contains("update_param="));
+        assert!(draw.normalized_content.contains("local l,p,e=z.b,z.l,z.u"));
+        assert!(draw.normalized_content.contains("for i=1,#z.o do"));
+
+        for asset in bundle.assets() {
+            assert!(frame_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
+        }
     }
 
     #[test]
@@ -421,6 +673,84 @@ mod tests {
     }
 
     #[test]
+    fn discovers_runtime_names_from_all_roots_with_precedence() {
+        let fixture = tempdir().unwrap();
+        let system_root = fixture.path().join("system");
+        let user_root = fixture.path().join("user");
+        let dev_root = fixture.path().join("dev");
+
+        write_fixture_runtime(&system_root, "default", "system-default");
+        write_fixture_runtime(&user_root, "default", "user-default");
+        write_fixture_runtime(&dev_root, "default", "dev-default");
+        write_fixture_runtime(&system_root, "legacy", "system-legacy");
+        write_fixture_runtime(&user_root, "local", "user-local");
+
+        let discovered = discover_runtimes_in_roots(&[
+            RuntimeRoot {
+                source: RuntimeSource::System,
+                path: system_root.clone(),
+            },
+            RuntimeRoot {
+                source: RuntimeSource::User,
+                path: user_root.clone(),
+            },
+            RuntimeRoot {
+                source: RuntimeSource::Dev,
+                path: dev_root.clone(),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|runtime| (runtime.name.as_str(), runtime.source))
+                .collect::<Vec<_>>(),
+            vec![
+                ("default", RuntimeSource::Dev),
+                ("legacy", RuntimeSource::System),
+                ("local", RuntimeSource::User),
+            ]
+        );
+        assert_eq!(
+            discovered
+                .iter()
+                .find(|runtime| runtime.name == "default")
+                .unwrap()
+                .path,
+            dev_root.join("default")
+        );
+    }
+
+    #[test]
+    fn discovery_ignores_non_runtime_directories() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("dev");
+
+        fs::create_dir_all(root.join("not-a-runtime")).unwrap();
+        write_fixture_runtime(&root, "default", "dev-default");
+
+        let discovered = discover_runtimes_in_roots(&[RuntimeRoot {
+            source: RuntimeSource::Dev,
+            path: root,
+        }])
+        .unwrap();
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].name, "default");
+    }
+
+    #[test]
+    fn resolve_runtime_reports_missing_name() {
+        let error = resolve_runtime("definitely-missing").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "runtime `definitely-missing` was not found"
+        );
+    }
+
+    #[test]
     fn normalizes_line_endings_and_trailing_newlines_before_hashing() {
         let normalized = normalize_text_content("line one\r\nline two\r\n\r\n");
 
@@ -432,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_hash_mismatches_from_the_manifest() {
+    fn ignores_removed_hash_fields_in_the_manifest() {
         let fixture = tempdir().unwrap();
         let root = fixture.path();
         let asset_path = root.join("lcd-init.lua");
@@ -443,6 +773,11 @@ mod tests {
 bundle_version = "test"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
 
 [[owned_slots]]
 name = "lcd-init"
@@ -457,20 +792,15 @@ runtime_marker = "fixture:lcd-init"
         )
         .unwrap();
 
-        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+        let bundle = RuntimeBundle::load_from_dir(root).unwrap();
 
-        assert_eq!(
-            error.to_string(),
-            "runtime asset hash mismatch for lcd-init.lua: expected aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, got 21cc312dc0da113b58ff40217cdafb0505e9602737287e43bfceb64c5997e4df"
-        );
+        assert_eq!(bundle.assets().len(), 1);
     }
 
     #[test]
     fn rejects_duplicate_field_inventory_entries() {
         let fixture = tempdir().unwrap();
         let root = fixture.path();
-        let hash = normalized_sha256("return 1\n");
-
         fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
         fs::write(
             root.join("manifest.toml"),
@@ -480,6 +810,11 @@ bundle_version = "test"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
 
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
 [[owned_slots]]
 name = "lcd-init"
 page = 0
@@ -487,7 +822,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-normalized_sha256 = "{hash}"
 runtime_marker = "fixture:lcd-init"
 
 [[fields]]
@@ -517,12 +851,297 @@ notes = "fixture"
     }
 
     #[test]
+    fn rejects_duplicate_layer_names() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "persistent"
+priority = 10
+activation = "temporary"
+timeout_ms = 1000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: duplicate layer name persistent"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_layer_priorities() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "slow"
+priority = 0
+activation = "temporary"
+timeout_ms = 5000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: duplicate layer priority 0"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_persistent_layer() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+timeout_ms = 5000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: at least one persistent layer must be declared"
+        );
+    }
+
+    #[test]
+    fn allows_multiple_persistent_layers() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "base"
+priority = 1
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let bundle = RuntimeBundle::load_from_dir(root).unwrap();
+
+        assert_eq!(bundle.manifest().layers.len(), 2);
+    }
+
+    #[test]
+    fn rejects_temporary_layers_without_timeout() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: temporary layer slow must define timeout_ms"
+        );
+    }
+
+    #[test]
+    fn rejects_persistent_layers_with_timeout() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+timeout_ms = 1000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: persistent layer persistent must not define timeout_ms"
+        );
+    }
+
+    #[test]
+    fn rejects_fields_that_reference_undeclared_layers() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+
+[[fields]]
+name = "slow.message"
+layer = "slow"
+value_kind = "text"
+runtime_key = "m"
+notes = "fixture"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: field slow.message references undeclared layer slow"
+        );
+    }
+
+    #[test]
     fn rejects_owned_slot_scripts_that_exceed_the_grid_config_limit() {
         let fixture = tempdir().unwrap();
         let root = fixture.path();
         let oversized = "a".repeat(909);
-        let hash = normalized_sha256(&frame_lua(&oversized));
-
         fs::write(root.join("lcd-init.lua"), oversized).unwrap();
         fs::write(
             root.join("manifest.toml"),
@@ -532,6 +1151,11 @@ bundle_version = "test"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
 
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
 [[owned_slots]]
 name = "lcd-init"
 page = 0
@@ -539,7 +1163,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-normalized_sha256 = "{hash}"
 runtime_marker = "fixture:lcd-init"
 "#
             ),
