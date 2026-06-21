@@ -9,7 +9,6 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
 
-pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-21-manifest-layers.1";
 pub const BUNDLED_RUNTIME_NAME: &str = "default";
 
 const BUNDLED_RUNTIME_ROOT: &str = "assets/runtimes";
@@ -26,7 +25,7 @@ pub enum RuntimeBundleError {
     RuntimeNotFound { name: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeBundle {
     root: PathBuf,
     manifest: RuntimeBundleManifest,
@@ -53,13 +52,8 @@ pub struct DiscoveredRuntime {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeBundleManifest {
-    pub bundle_version: String,
-    pub compatibility_reference: String,
-    pub runtime_marker: String,
-    #[serde(default)]
-    pub compatibility_notes: Vec<String>,
     pub layers: Vec<RuntimeLayerSpec>,
     pub owned_slots: Vec<OwnedRuntimeSlot>,
     #[serde(default)]
@@ -92,15 +86,15 @@ pub struct OwnedRuntimeSlot {
     pub event: u8,
     pub asset: String,
     pub install_order: u32,
-    pub runtime_marker: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeFieldSpec {
     pub name: String,
     pub layer: String,
     pub value_kind: String,
     pub runtime_key: String,
+    pub clear_value: toml::Value,
     pub notes: String,
 }
 
@@ -183,11 +177,7 @@ impl RuntimeBundle {
             bundles.push(Self::load_from_dir(path)?);
         }
 
-        bundles.sort_by(|left, right| {
-            left.manifest
-                .bundle_version
-                .cmp(&right.manifest.bundle_version)
-        });
+        bundles.sort_by(|left, right| left.root.cmp(&right.root));
         Ok(bundles)
     }
 
@@ -388,12 +378,6 @@ pub fn normalized_sha256(content: &str) -> String {
 }
 
 fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
-    if manifest.bundle_version.trim().is_empty() {
-        return Err(RuntimeBundleError::InvalidManifest {
-            message: "bundle_version must not be empty".to_string(),
-        });
-    }
-
     validate_layers(manifest)?;
 
     if manifest.owned_slots.is_empty() {
@@ -570,7 +554,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    fn write_fixture_runtime(root: &Path, name: &str, bundle_version: &str) {
+    fn write_fixture_runtime(root: &Path, name: &str) {
         let runtime_root = root.join(name);
         let content = "return 1\n";
         fs::create_dir_all(&runtime_root).unwrap();
@@ -579,10 +563,6 @@ mod tests {
             runtime_root.join("manifest.toml"),
             format!(
                 r#"
-bundle_version = "{bundle_version}"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -595,7 +575,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#
             ),
         )
@@ -607,7 +586,6 @@ runtime_marker = "fixture:lcd-init"
         let bundle = RuntimeBundle::bundled().unwrap();
 
         assert_eq!(bundle.root(), bundled_runtime_dir().as_path());
-        assert_eq!(bundle.manifest().bundle_version, BUNDLED_RUNTIME_VERSION);
         assert_eq!(bundle.assets().len(), 2);
         assert_eq!(bundle.assets()[0].slot.name, "lcd-init");
         assert_eq!(bundle.assets()[1].slot.name, "lcd-draw");
@@ -657,19 +635,62 @@ runtime_marker = "fixture:lcd-init"
         let bundles = RuntimeBundle::load_bundled_family().unwrap();
 
         assert!(!bundles.is_empty());
-        assert_eq!(
-            bundles.last().unwrap().manifest().bundle_version,
-            BUNDLED_RUNTIME_VERSION
-        );
-
-        let versions = bundles
+        assert!(bundles
             .iter()
-            .map(|bundle| bundle.manifest().bundle_version.as_str())
-            .collect::<Vec<_>>();
-        let mut sorted_versions = versions.clone();
-        sorted_versions.sort();
+            .any(|bundle| bundle.root() == bundled_runtime_dir()));
 
-        assert_eq!(versions, sorted_versions);
+        let names = bundles
+            .iter()
+            .map(|bundle| {
+                bundle
+                    .root()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+
+        assert_eq!(names, sorted_names);
+    }
+
+    #[test]
+    fn media_runtime_manifest_and_assets_load() {
+        let bundle =
+            RuntimeBundle::load_from_dir(bundled_runtime_root_dir().join("media")).unwrap();
+
+        assert_eq!(bundle.assets().len(), 2);
+        assert_eq!(
+            bundle
+                .manifest()
+                .layers
+                .iter()
+                .map(|layer| (layer.name.as_str(), layer.activation, layer.timeout_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                ("base", RuntimeLayerActivation::Persistent, None),
+                (
+                    "playback_status",
+                    RuntimeLayerActivation::Temporary,
+                    Some(2000)
+                ),
+            ]
+        );
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "base.duration"));
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "playback_status.status"));
+
+        for asset in bundle.assets() {
+            assert!(frame_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
+        }
     }
 
     #[test]
@@ -679,11 +700,11 @@ runtime_marker = "fixture:lcd-init"
         let user_root = fixture.path().join("user");
         let dev_root = fixture.path().join("dev");
 
-        write_fixture_runtime(&system_root, "default", "system-default");
-        write_fixture_runtime(&user_root, "default", "user-default");
-        write_fixture_runtime(&dev_root, "default", "dev-default");
-        write_fixture_runtime(&system_root, "legacy", "system-legacy");
-        write_fixture_runtime(&user_root, "local", "user-local");
+        write_fixture_runtime(&system_root, "default");
+        write_fixture_runtime(&user_root, "default");
+        write_fixture_runtime(&dev_root, "default");
+        write_fixture_runtime(&system_root, "legacy");
+        write_fixture_runtime(&user_root, "local");
 
         let discovered = discover_runtimes_in_roots(&[
             RuntimeRoot {
@@ -728,7 +749,7 @@ runtime_marker = "fixture:lcd-init"
         let root = fixture.path().join("dev");
 
         fs::create_dir_all(root.join("not-a-runtime")).unwrap();
-        write_fixture_runtime(&root, "default", "dev-default");
+        write_fixture_runtime(&root, "default");
 
         let discovered = discover_runtimes_in_roots(&[RuntimeRoot {
             source: RuntimeSource::Dev,
@@ -770,10 +791,6 @@ runtime_marker = "fixture:lcd-init"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -787,7 +804,6 @@ event = 0
 asset = "lcd-init.lua"
 install_order = 10
 normalized_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-runtime_marker = "fixture:lcd-init"
 "#,
         )
         .unwrap();
@@ -806,10 +822,6 @@ runtime_marker = "fixture:lcd-init"
             root.join("manifest.toml"),
             format!(
                 r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -822,13 +834,13 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 
 [[fields]]
 name = "persistent.title"
 layer = "persistent"
 value_kind = "text"
 runtime_key = "persistent.title"
+clear_value = ""
 notes = "fixture"
 
 [[fields]]
@@ -836,6 +848,7 @@ name = "persistent.title"
 layer = "persistent"
 value_kind = "text"
 runtime_key = "persistent.title"
+clear_value = ""
 notes = "fixture"
 "#
             ),
@@ -858,10 +871,6 @@ notes = "fixture"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -880,7 +889,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#,
         )
         .unwrap();
@@ -901,10 +909,6 @@ runtime_marker = "fixture:lcd-init"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -923,7 +927,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#,
         )
         .unwrap();
@@ -944,10 +947,6 @@ runtime_marker = "fixture:lcd-init"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "slow"
 priority = 10
@@ -961,7 +960,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#,
         )
         .unwrap();
@@ -982,10 +980,6 @@ runtime_marker = "fixture:lcd-init"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1003,7 +997,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#,
         )
         .unwrap();
@@ -1021,10 +1014,6 @@ runtime_marker = "fixture:lcd-init"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1042,7 +1031,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#,
         )
         .unwrap();
@@ -1063,10 +1051,6 @@ runtime_marker = "fixture:lcd-init"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1080,7 +1064,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#,
         )
         .unwrap();
@@ -1101,10 +1084,6 @@ runtime_marker = "fixture:lcd-init"
         fs::write(
             root.join("manifest.toml"),
             r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1117,13 +1096,13 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 
 [[fields]]
 name = "slow.message"
 layer = "slow"
 value_kind = "text"
 runtime_key = "m"
+clear_value = ""
 notes = "fixture"
 "#,
         )
@@ -1147,10 +1126,6 @@ notes = "fixture"
             root.join("manifest.toml"),
             format!(
                 r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1163,7 +1138,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 "#
             ),
         )

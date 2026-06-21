@@ -3,13 +3,14 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::path::Path;
 
+use toml::Value as TomlValue;
+
 use crate::runtime::installed_runtime_dir;
 use crate::runtime_bundle::{
     RuntimeBundle, RuntimeBundleError, RuntimeFieldSpec, RuntimeLayerActivation,
 };
 
 const TEXT_LIST_ITEM_COUNT: usize = 8;
-const DEFAULT_INFO_LABEL: &str = "---";
 
 pub type Result<T> = std::result::Result<T, ScreenError>;
 
@@ -61,19 +62,21 @@ pub struct ScreenLayerSpec {
 pub enum ScreenValueKind {
     Text,
     Int,
+    Float,
     Bool,
     TextList,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ScreenValue {
     Text(String),
     Int(i32),
+    Float(f64),
     Bool(bool),
     TextList(Vec<String>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScreenFieldSpec {
     public_name: String,
     layer: ScreenLayer,
@@ -82,13 +85,13 @@ pub struct ScreenFieldSpec {
     clear_value: ScreenValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScreenAssignment {
     field: ScreenFieldSpec,
     value: ScreenValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScreenFieldRegistry {
     layers: Vec<ScreenLayerSpec>,
     layers_by_name: HashMap<String, usize>,
@@ -201,6 +204,7 @@ impl ScreenValueKind {
         match self {
             Self::Text => "text",
             Self::Int => "an integer",
+            Self::Float => "a number",
             Self::Bool => "a boolean (`true` or `false`)",
             Self::TextList => "8 pipe-separated text items",
         }
@@ -210,6 +214,7 @@ impl ScreenValueKind {
         match raw {
             "text" => Ok(Self::Text),
             "int" => Ok(Self::Int),
+            "float" => Ok(Self::Float),
             "bool" => Ok(Self::Bool),
             "text_list" => Ok(Self::TextList),
             _ => Err(ScreenError::InvalidRuntimeFieldSpec {
@@ -225,6 +230,7 @@ impl ScreenValue {
         match self {
             Self::Text(_) => ScreenValueKind::Text,
             Self::Int(_) => ScreenValueKind::Int,
+            Self::Float(_) => ScreenValueKind::Float,
             Self::Bool(_) => ScreenValueKind::Bool,
             Self::TextList(_) => ScreenValueKind::TextList,
         }
@@ -486,17 +492,8 @@ fn build_field_spec(runtime_field: &RuntimeFieldSpec) -> Result<ScreenFieldSpec>
         });
     }
 
-    let clear_value = clear_value_for_field(&runtime_field.name)?;
-    if clear_value.kind() != value_kind {
-        return Err(ScreenError::InvalidRuntimeFieldSpec {
-            field: runtime_field.name.clone(),
-            message: format!(
-                "host clear value kind `{}` does not match manifest value kind `{}`",
-                clear_value.kind().expected_description(),
-                value_kind.expected_description()
-            ),
-        });
-    }
+    let clear_value =
+        parse_manifest_clear_value(&runtime_field.name, value_kind, &runtime_field.clear_value)?;
 
     Ok(ScreenFieldSpec {
         public_name: runtime_field.name.clone(),
@@ -507,26 +504,43 @@ fn build_field_spec(runtime_field: &RuntimeFieldSpec) -> Result<ScreenFieldSpec>
     })
 }
 
-fn clear_value_for_field(field_name: &str) -> Result<ScreenValue> {
-    match field_name {
-        "persistent.title" | "persistent.bottom" | "slow.message" | "fast.action" => {
-            Ok(ScreenValue::Text(String::new()))
-        }
-        "persistent.value" | "persistent.min" | "persistent.step" | "persistent.bank" => {
-            Ok(ScreenValue::Int(0))
-        }
-        "persistent.max" => Ok(ScreenValue::Int(127)),
-        "persistent.default" => Ok(ScreenValue::Int(-1)),
-        "persistent.info" => Ok(ScreenValue::TextList(vec![
-            DEFAULT_INFO_LABEL.to_string();
-            TEXT_LIST_ITEM_COUNT
-        ])),
-        "persistent.clamp_min" | "persistent.clamp_max" => Ok(ScreenValue::Bool(false)),
-        _ => Err(ScreenError::InvalidRuntimeFieldSpec {
-            field: field_name.to_string(),
-            message: "missing host clear behavior for this curated field".to_string(),
+fn parse_manifest_clear_value(
+    field_name: &str,
+    value_kind: ScreenValueKind,
+    clear_value: &TomlValue,
+) -> Result<ScreenValue> {
+    match value_kind {
+        ScreenValueKind::Text => clear_value
+            .as_str()
+            .map(|value| ScreenValue::Text(value.to_string())),
+        ScreenValueKind::Int => clear_value
+            .as_integer()
+            .and_then(|value| i32::try_from(value).ok())
+            .map(ScreenValue::Int),
+        ScreenValueKind::Float => clear_value
+            .as_float()
+            .or_else(|| clear_value.as_integer().map(|value| value as f64))
+            .map(ScreenValue::Float),
+        ScreenValueKind::Bool => clear_value.as_bool().map(ScreenValue::Bool),
+        ScreenValueKind::TextList => clear_value.as_array().and_then(|items| {
+            if items.len() != TEXT_LIST_ITEM_COUNT {
+                return None;
+            }
+
+            items
+                .iter()
+                .map(|item| item.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+                .map(ScreenValue::TextList)
         }),
     }
+    .ok_or_else(|| ScreenError::InvalidRuntimeFieldSpec {
+        field: field_name.to_string(),
+        message: format!(
+            "manifest clear_value does not match declared value kind `{}`",
+            value_kind.expected_description()
+        ),
+    })
 }
 
 fn parse_value(field: &ScreenFieldSpec, raw_value: &str) -> Result<ScreenValue> {
@@ -542,6 +556,14 @@ fn parse_value(field: &ScreenFieldSpec, raw_value: &str) -> Result<ScreenValue> 
                     actual: raw_value.to_string(),
                 })
         }
+        ScreenValueKind::Float => raw_value
+            .parse::<f64>()
+            .map(ScreenValue::Float)
+            .map_err(|_| ScreenError::InvalidValue {
+                field: field.public_name.clone(),
+                expected: field.value_kind.expected_description(),
+                actual: raw_value.to_string(),
+            }),
         ScreenValueKind::Bool => {
             parse_bool(raw_value)
                 .map(ScreenValue::Bool)
@@ -618,6 +640,7 @@ fn compile_lua_value(value: &ScreenValue) -> String {
     match value {
         ScreenValue::Text(text) => quote_lua_string(text),
         ScreenValue::Int(value) => value.to_string(),
+        ScreenValue::Float(value) => value.to_string(),
         ScreenValue::Bool(value) => value.to_string(),
         ScreenValue::TextList(items) => format!(
             "{{{}}}",
@@ -669,11 +692,23 @@ mod tests {
         assert_eq!(title.runtime_key(), "t");
         assert_eq!(title.clear_value(), &ScreenValue::Text(String::new()));
 
+        let media = ScreenFieldRegistry::from_bundle(
+            &RuntimeBundle::load_from_dir(
+                crate::runtime_bundle::bundled_runtime_root_dir().join("media"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            media.field("base.duration").unwrap().value_kind(),
+            ScreenValueKind::Float
+        );
+
         let info = registry.field("persistent.info").unwrap();
         assert_eq!(info.value_kind(), ScreenValueKind::TextList);
         assert_eq!(
             info.clear_value(),
-            &ScreenValue::TextList(vec![DEFAULT_INFO_LABEL.to_string(); TEXT_LIST_ITEM_COUNT])
+            &ScreenValue::TextList(vec!["---".to_string(); TEXT_LIST_ITEM_COUNT])
         );
     }
 
@@ -688,6 +723,7 @@ name = "persistent.title"
 layer = "persistent"
 value_kind = "text"
 runtime_key = "t"
+clear_value = ""
 notes = "fixture"
 "#,
         );
@@ -744,6 +780,23 @@ notes = "fixture"
     }
 
     #[test]
+    fn parses_float_screen_assignments_into_typed_values() {
+        let media = ScreenFieldRegistry::from_bundle(
+            &RuntimeBundle::load_from_dir(
+                crate::runtime_bundle::bundled_runtime_root_dir().join("media"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let assignments = media
+            .parse_assignments(["base.duration=344.5", "base.position=91.25"])
+            .unwrap();
+
+        assert_eq!(assignments[0].value(), &ScreenValue::Float(344.5));
+        assert_eq!(assignments[1].value(), &ScreenValue::Float(91.25));
+    }
+
+    #[test]
     fn rejects_unknown_screen_field_names() {
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
@@ -797,6 +850,19 @@ notes = "fixture"
         assert_eq!(
             list_error.to_string(),
             "invalid value for screen field `persistent.info`: expected 8 pipe-separated text items, got `one|two|three`"
+        );
+
+        let media = ScreenFieldRegistry::from_bundle(
+            &RuntimeBundle::load_from_dir(
+                crate::runtime_bundle::bundled_runtime_root_dir().join("media"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let float_error = media.parse_assignment("base.duration=abc").unwrap_err();
+        assert_eq!(
+            float_error.to_string(),
+            "invalid value for screen field `base.duration`: expected a number, got `abc`"
         );
     }
 
@@ -877,6 +943,27 @@ notes = "fixture"
         let lua = compile_set_lua(&assignments, None).unwrap();
 
         assert_eq!(lua, "set_field('slow','m','Disk almost full')");
+    }
+
+    #[test]
+    fn compiles_float_updates_with_generic_runtime_helpers() {
+        let media = ScreenFieldRegistry::from_bundle(
+            &RuntimeBundle::load_from_dir(
+                crate::runtime_bundle::bundled_runtime_root_dir().join("media"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let assignments = media
+            .parse_assignments(["base.duration=344.5", "base.position=91.25"])
+            .unwrap();
+
+        let lua = compile_set_lua(&assignments, None).unwrap();
+
+        assert_eq!(
+            lua,
+            "set_field('base','d',344.5);set_field('base','p',91.25)"
+        );
     }
 
     #[test]
@@ -999,8 +1086,9 @@ notes = "fixture"
 [[fields]]
 name = "persistent.title"
 layer = "persistent"
-value_kind = "float"
+value_kind = "decimal"
 runtime_key = "t"
+clear_value = ""
 notes = "fixture"
 "#,
         );
@@ -1010,7 +1098,7 @@ notes = "fixture"
 
         assert_eq!(
             error.to_string(),
-            "invalid bundled screen field `persistent.title`: unsupported value kind `float`"
+            "invalid bundled screen field `persistent.title`: unsupported value kind `decimal`"
         );
     }
 
@@ -1025,6 +1113,7 @@ name = "fast.action"
 layer = "slow"
 value_kind = "text"
 runtime_key = "a"
+clear_value = ""
 notes = "fixture"
 "#,
         );
@@ -1038,6 +1127,96 @@ notes = "fixture"
         );
     }
 
+    #[test]
+    fn supports_manifest_defined_clear_values_for_non_legacy_field_names() {
+        let fixture = tempdir().unwrap();
+        write_bundle_fixture(
+            fixture.path(),
+            r#"
+[[fields]]
+name = "base.duration"
+layer = "base"
+value_kind = "int"
+runtime_key = "d"
+clear_value = 0
+notes = "fixture"
+
+[[fields]]
+name = "playback_status.status"
+layer = "playback_status"
+value_kind = "text"
+runtime_key = "s"
+clear_value = ""
+notes = "fixture"
+"#,
+        );
+
+        let bundle = RuntimeBundle::load_from_dir(fixture.path()).unwrap();
+        let registry = ScreenFieldRegistry::from_bundle(&bundle).unwrap();
+
+        assert_eq!(
+            registry.field("base.duration").unwrap().clear_value(),
+            &ScreenValue::Int(0)
+        );
+        assert_eq!(
+            registry
+                .field("playback_status.status")
+                .unwrap()
+                .clear_value(),
+            &ScreenValue::Text(String::new())
+        );
+    }
+
+    #[test]
+    fn supports_manifest_defined_float_clear_values() {
+        let fixture = tempdir().unwrap();
+        write_bundle_fixture(
+            fixture.path(),
+            r#"
+[[fields]]
+name = "base.position"
+layer = "base"
+value_kind = "float"
+runtime_key = "p"
+clear_value = 0.0
+notes = "fixture"
+"#,
+        );
+
+        let bundle = RuntimeBundle::load_from_dir(fixture.path()).unwrap();
+        let registry = ScreenFieldRegistry::from_bundle(&bundle).unwrap();
+
+        assert_eq!(
+            registry.field("base.position").unwrap().clear_value(),
+            &ScreenValue::Float(0.0)
+        );
+    }
+
+    #[test]
+    fn rejects_manifest_clear_values_with_the_wrong_type() {
+        let fixture = tempdir().unwrap();
+        write_bundle_fixture(
+            fixture.path(),
+            r#"
+[[fields]]
+name = "base.duration"
+layer = "base"
+value_kind = "int"
+runtime_key = "d"
+clear_value = "zero"
+notes = "fixture"
+"#,
+        );
+
+        let bundle = RuntimeBundle::load_from_dir(fixture.path()).unwrap();
+        let error = ScreenFieldRegistry::from_bundle(&bundle).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid bundled screen field `base.duration`: manifest clear_value does not match declared value kind `an integer`"
+        );
+    }
+
     fn write_bundle_fixture(root: &Path, fields: &str) {
         let asset_content = "return 1\n";
 
@@ -1046,13 +1225,14 @@ notes = "fixture"
             root.join("manifest.toml"),
             format!(
                 r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "base"
+priority = 1
 activation = "persistent"
 
 [[layers]]
@@ -1067,6 +1247,12 @@ priority = 20
 activation = "temporary"
 timeout_ms = 1000
 
+[[layers]]
+name = "playback_status"
+priority = 30
+activation = "temporary"
+timeout_ms = 2000
+
 [[owned_slots]]
 name = "lcd-init"
 page = 0
@@ -1074,7 +1260,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 
 {fields}
 "#

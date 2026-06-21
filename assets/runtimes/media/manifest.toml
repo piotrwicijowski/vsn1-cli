@@ -1,0 +1,76 @@
+[[layers]]
+name = "base"
+priority = 0
+activation = "persistent"
+notes = "Primary media metadata and progress layer."
+
+[[layers]]
+name = "playback_status"
+priority = 10
+activation = "temporary"
+timeout_ms = 2000
+notes = "Temporary playback state overlay shown above the base layer."
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+
+[[owned_slots]]
+name = "lcd-draw"
+page = 0
+element = 13
+event = 8
+asset = "lcd-draw.lua"
+install_order = 20
+
+[[fields]]
+name = "base.artist"
+layer = "base"
+value_kind = "text"
+runtime_key = "a"
+clear_value = ""
+notes = "Artist line shown above the title."
+
+[[fields]]
+name = "base.title"
+layer = "base"
+value_kind = "text"
+runtime_key = "t"
+clear_value = ""
+notes = "Primary track title."
+
+[[fields]]
+name = "base.album"
+layer = "base"
+value_kind = "text"
+runtime_key = "l"
+clear_value = ""
+notes = "Album line shown under the title."
+
+[[fields]]
+name = "base.duration"
+layer = "base"
+value_kind = "float"
+runtime_key = "d"
+clear_value = 0.0
+notes = "Track duration in whole seconds, formatted on-device as mm:ss."
+
+[[fields]]
+name = "base.position"
+layer = "base"
+value_kind = "float"
+runtime_key = "p"
+clear_value = 0.0
+notes = "Current playback position in whole seconds, formatted on-device as mm:ss."
+
+[[fields]]
+name = "playback_status.status"
+layer = "playback_status"
+value_kind = "text"
+runtime_key = "s"
+clear_value = ""
+notes = "Temporary playback status text such as Playing or Paused."

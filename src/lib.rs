@@ -736,9 +736,8 @@ fn render_runtime_output(
     verified: bool,
 ) -> String {
     let mut output = format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nInstalled runtime version: {}\nStatus: {}\n",
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nInstalled runtime: frozen copy present\nStatus: {}\n",
         protocol::GRID_BAUD_RATE,
-        report.bundle_version(),
         report.status_label(),
     );
 

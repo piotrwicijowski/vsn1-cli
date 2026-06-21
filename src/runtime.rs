@@ -91,7 +91,6 @@ pub struct RuntimeSlotInspection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeInspectionReport {
-    bundle_version: String,
     requested_target: ResolvedTarget,
     observed_targets: Vec<GridTarget>,
     slot_inspections: Vec<RuntimeSlotInspection>,
@@ -117,11 +116,6 @@ pub struct RuntimeRemoveReport {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct StoredRuntimeManifest {
-    bundle_version: String,
-    compatibility_reference: String,
-    runtime_marker: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    compatibility_notes: Vec<String>,
     layers: Vec<RuntimeLayerSpec>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     owned_slots: Vec<StoredOwnedRuntimeSlot>,
@@ -135,7 +129,6 @@ struct StoredOwnedRuntimeSlot {
     event: u8,
     asset: String,
     install_order: u32,
-    runtime_marker: String,
 }
 
 pub struct TransportRuntimeSlotReader<T> {
@@ -219,10 +212,6 @@ impl From<TransportError> for RuntimeError {
 }
 
 impl RuntimeInspectionReport {
-    pub fn bundle_version(&self) -> &str {
-        &self.bundle_version
-    }
-
     pub fn requested_target(&self) -> ResolvedTarget {
         self.requested_target
     }
@@ -553,8 +542,7 @@ where
         Ok(report)
     } else {
         Err(RuntimeError::verification_failed(format!(
-            "bundled runtime {} is not an exact match: {}",
-            report.bundle_version(),
+            "runtime bundle is not an exact match: {}",
             report.verification_failure_summary()
         )))
     }
@@ -610,8 +598,7 @@ where
         Ok(report)
     } else {
         Err(RuntimeError::verification_failed(format!(
-            "installed runtime {} is not an exact match: {}",
-            report.bundle_version(),
+            "installed runtime is not an exact match: {}",
             report.verification_failure_summary()
         )))
     }
@@ -704,8 +691,7 @@ where
     let report = inspect_runtime_bundle(&bundle, requested_target, reader)?;
     if report.is_exact_match() {
         return Err(RuntimeError::verification_failed(format!(
-            "installed runtime {} is already installed exactly; runtime repair is only for drifted or partial managed content",
-            bundle.manifest().bundle_version
+            "installed runtime is already installed exactly; runtime repair is only for drifted or partial managed content"
         )));
     }
 
@@ -794,8 +780,7 @@ where
     let verification_report = inspect_runtime_bundle(&bundle, requested_target, reader)?;
     if !verification_report.is_exact_match() {
         return Err(RuntimeError::verification_failed(format!(
-            "post-install bundled runtime {} is not an exact match: {}",
-            verification_report.bundle_version(),
+            "post-install runtime is not an exact match: {}",
             verification_report.verification_failure_summary()
         )));
     }
@@ -902,16 +887,6 @@ where
     }
 
     let manifest = StoredRuntimeManifest {
-        bundle_version: format!(
-            "pre-install-backup-from-{}",
-            bundle.manifest().bundle_version
-        ),
-        compatibility_reference: "VSN1 pre-install backup captured by vsn1-cli".to_string(),
-        runtime_marker: "vsn1-cli:pre-install-backup".to_string(),
-        compatibility_notes: vec![format!(
-            "captured from requested target {} before runtime install",
-            requested_target
-        )],
         layers: bundle.manifest().layers.clone(),
         owned_slots: bundle
             .assets()
@@ -923,7 +898,6 @@ where
                 event: asset.slot.event,
                 asset: asset.slot.asset.clone(),
                 install_order: asset.slot.install_order,
-                runtime_marker: format!("vsn1-cli:pre-install-backup:{}", asset.slot.name),
             })
             .collect(),
     };
@@ -1146,7 +1120,6 @@ where
     }
 
     Ok(RuntimeInspectionReport {
-        bundle_version: bundle.manifest().bundle_version.clone(),
         requested_target,
         observed_targets,
         slot_inspections,
@@ -1582,7 +1555,7 @@ mod tests {
         RuntimeBundle::load_from_dir(pre_install_runtime_dir_from_root(root)).unwrap()
     }
 
-    fn write_runtime_bundle_dir(runtime_root: &Path, bundle_version: &str, draw_content: &str) {
+    fn write_runtime_bundle_dir(runtime_root: &Path, draw_content: &str) {
         let init_content = "return 'init'\n";
 
         fs::create_dir_all(runtime_root).unwrap();
@@ -1592,10 +1565,6 @@ mod tests {
             runtime_root.join("manifest.toml"),
             format!(
                 r#"
-bundle_version = "{bundle_version}"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1608,7 +1577,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 
 [[owned_slots]]
 name = "lcd-draw"
@@ -1617,15 +1585,14 @@ element = 13
 event = 8
 asset = "lcd-draw.lua"
 install_order = 20
-runtime_marker = "fixture:lcd-draw"
 "#,
             ),
         )
         .unwrap();
     }
 
-    fn write_runtime_fixture(root: &Path, name: &str, bundle_version: &str, draw_content: &str) {
-        write_runtime_bundle_dir(&root.join(name), bundle_version, draw_content);
+    fn write_runtime_fixture(root: &Path, name: &str, draw_content: &str) {
+        write_runtime_bundle_dir(&root.join(name), draw_content);
     }
 
     #[test]
@@ -1711,12 +1678,7 @@ runtime_marker = "fixture:lcd-draw"
     #[test]
     fn inspect_runtime_with_optional_bundle_dir_uses_frozen_runtime_copy_when_present() {
         let fixture = tempdir().unwrap();
-        write_runtime_fixture(
-            fixture.path(),
-            "runtime",
-            "frozen-runtime",
-            "return 'draw'\n",
-        );
+        write_runtime_fixture(fixture.path(), "runtime", "return 'draw'\n");
         let bundle = RuntimeBundle::load_from_dir(fixture.path().join("runtime")).unwrap();
         let mut reader = StaticSlotReader::default();
 
@@ -1736,7 +1698,6 @@ runtime_marker = "fixture:lcd-draw"
         .unwrap()
         .unwrap();
 
-        assert_eq!(report.bundle_version(), "frozen-runtime");
         assert!(report.is_exact_match());
     }
 
@@ -1770,9 +1731,6 @@ runtime_marker = "fixture:lcd-draw"
         fs::write(
             fixture.path().join("manifest.toml"),
             r#"
-bundle_version = "broken"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
 layers = [{ name = "persistent", priority = 0, activation = "persistent" }]
 owned_slots = []
 "#,
@@ -1807,10 +1765,6 @@ owned_slots = []
             root.join("manifest.toml"),
             format!(
                 r#"
-bundle_version = "test-install"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1823,7 +1777,6 @@ element = 13
 event = 8
 asset = "second.lua"
 install_order = 20
-runtime_marker = "fixture:second"
 
 [[owned_slots]]
 name = "first"
@@ -1832,7 +1785,6 @@ element = 13
 event = 0
 asset = "first.lua"
 install_order = 10
-runtime_marker = "fixture:first"
 "#,
             ),
         )
@@ -1877,7 +1829,7 @@ runtime_marker = "fixture:first"
 
         let installed_bundle =
             RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(&config_root)).unwrap();
-        assert_eq!(installed_bundle.manifest().bundle_version, "test-install");
+        assert_eq!(installed_bundle.assets().len(), 2);
 
         let backup_bundle = read_backup_bundle(&config_root);
         assert_eq!(backup_bundle.assets().len(), 2);
@@ -1934,9 +1886,9 @@ runtime_marker = "fixture:first"
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains(
-            "post-install bundled runtime 2026-06-21-manifest-layers.1 is not an exact match"
-        ));
+        assert!(error
+            .to_string()
+            .contains("post-install runtime is not an exact match"));
         assert!(error
             .to_string()
             .contains("lcd-draw at page=0 element=13 event=8 drifted"));
@@ -1946,18 +1898,8 @@ runtime_marker = "fixture:first"
     fn upgrade_overwrites_device_without_refreshing_pre_install_backup() {
         let fixture = tempdir().unwrap();
         let storage = tempdir().unwrap();
-        write_runtime_fixture(
-            fixture.path(),
-            "current",
-            "2026-06-21-manifest-layers.1",
-            "return 'current draw'\n",
-        );
-        write_runtime_fixture(
-            fixture.path(),
-            "older",
-            "2026-06-17-screen-first.7",
-            "return 'older draw'\n",
-        );
+        write_runtime_fixture(fixture.path(), "current", "return 'current draw'\n");
+        write_runtime_fixture(fixture.path(), "older", "return 'older draw'\n");
 
         let current_bundle = RuntimeBundle::load_from_dir(fixture.path().join("current")).unwrap();
         let older_bundle = RuntimeBundle::load_from_dir(fixture.path().join("older")).unwrap();
@@ -2005,8 +1947,16 @@ runtime_marker = "fixture:first"
         let installed_bundle =
             RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(storage.path())).unwrap();
         assert_eq!(
-            installed_bundle.manifest().bundle_version,
-            current_bundle.manifest().bundle_version
+            installed_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.normalized_content.as_str())
+                .collect::<Vec<_>>(),
+            current_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.normalized_content.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(pre_install_runtime_dir_from_root(storage.path())
             .join("sentinel.txt")
@@ -2065,8 +2015,16 @@ runtime_marker = "fixture:first"
         let installed_bundle =
             RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(fixture.path())).unwrap();
         assert_eq!(
-            installed_bundle.manifest().bundle_version,
-            bundle.manifest().bundle_version
+            installed_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.normalized_content.as_str())
+                .collect::<Vec<_>>(),
+            bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.normalized_content.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2116,12 +2074,10 @@ runtime_marker = "fixture:first"
         let bundle = RuntimeBundle::bundled().unwrap();
         write_runtime_bundle_dir(
             &installed_runtime_dir_from_root(fixture.path()),
-            &bundle.manifest().bundle_version,
             "return 'installed draw'\n",
         );
         write_runtime_bundle_dir(
             &pre_install_runtime_dir_from_root(fixture.path()),
-            "pre-install-backup",
             "return 'backup draw'\n",
         );
         let mut accessor = RecordingSlotAccessor {
@@ -2171,7 +2127,6 @@ runtime_marker = "fixture:first"
         let bundle = RuntimeBundle::bundled().unwrap();
         write_runtime_bundle_dir(
             &installed_runtime_dir_from_root(fixture.path()),
-            &bundle.manifest().bundle_version,
             "return 'installed draw'\n",
         );
         let mut accessor = RecordingSlotAccessor::default();
