@@ -1225,10 +1225,6 @@ notes = "fixture"
             root.join("manifest.toml"),
             format!(
                 r#"
-bundle_version = "test"
-compatibility_reference = "fixture"
-runtime_marker = "fixture"
-
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1264,7 +1260,6 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "fixture:lcd-init"
 
 {fields}
 "#
