@@ -14,11 +14,40 @@ This project is intentionally screen-first and one-shot only. The CLI provisions
 
 ## Install And Build
 
+Build from the checkout:
+
 ```bash
 cargo build
 ```
 
-Show help:
+Install the CLI system-wide with the checked-in runtimes:
+
+```bash
+make install
+sudo make install
+```
+
+Default install locations:
+
+- binary: `/usr/local/bin/vsn1-cli`
+- runtimes: `/usr/share/vsn1-cli/runtimes`
+
+Override paths for packaging or staged installs with `DESTDIR`, `BINDIR`, or `RUNTIME_ROOT`.
+
+Quick verification after install:
+
+```bash
+vsn1-cli --help
+vsn1-cli runtime list
+```
+
+Remove the system-wide install:
+
+```bash
+sudo make uninstall
+```
+
+Show help from the dev checkout without installing:
 
 ```bash
 cargo run -- --help
