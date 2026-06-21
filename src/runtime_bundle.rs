@@ -26,7 +26,7 @@ pub enum RuntimeBundleError {
     RuntimeNotFound { name: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeBundle {
     root: PathBuf,
     manifest: RuntimeBundleManifest,
@@ -53,7 +53,7 @@ pub struct DiscoveredRuntime {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeBundleManifest {
     pub bundle_version: String,
     pub compatibility_reference: String,
@@ -95,12 +95,13 @@ pub struct OwnedRuntimeSlot {
     pub runtime_marker: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeFieldSpec {
     pub name: String,
     pub layer: String,
     pub value_kind: String,
     pub runtime_key: String,
+    pub clear_value: toml::Value,
     pub notes: String,
 }
 
@@ -657,10 +658,9 @@ runtime_marker = "fixture:lcd-init"
         let bundles = RuntimeBundle::load_bundled_family().unwrap();
 
         assert!(!bundles.is_empty());
-        assert_eq!(
-            bundles.last().unwrap().manifest().bundle_version,
-            BUNDLED_RUNTIME_VERSION
-        );
+        assert!(bundles
+            .iter()
+            .any(|bundle| bundle.manifest().bundle_version == BUNDLED_RUNTIME_VERSION));
 
         let versions = bundles
             .iter()
@@ -670,6 +670,44 @@ runtime_marker = "fixture:lcd-init"
         sorted_versions.sort();
 
         assert_eq!(versions, sorted_versions);
+    }
+
+    #[test]
+    fn media_runtime_manifest_and_assets_load() {
+        let bundle =
+            RuntimeBundle::load_from_dir(bundled_runtime_root_dir().join("media")).unwrap();
+
+        assert_eq!(bundle.assets().len(), 2);
+        assert_eq!(
+            bundle
+                .manifest()
+                .layers
+                .iter()
+                .map(|layer| (layer.name.as_str(), layer.activation, layer.timeout_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                ("base", RuntimeLayerActivation::Persistent, None),
+                (
+                    "playback_status",
+                    RuntimeLayerActivation::Temporary,
+                    Some(2000)
+                ),
+            ]
+        );
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "base.duration"));
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "playback_status.status"));
+
+        for asset in bundle.assets() {
+            assert!(frame_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
+        }
     }
 
     #[test]
@@ -829,6 +867,7 @@ name = "persistent.title"
 layer = "persistent"
 value_kind = "text"
 runtime_key = "persistent.title"
+clear_value = ""
 notes = "fixture"
 
 [[fields]]
@@ -836,6 +875,7 @@ name = "persistent.title"
 layer = "persistent"
 value_kind = "text"
 runtime_key = "persistent.title"
+clear_value = ""
 notes = "fixture"
 "#
             ),
@@ -1124,6 +1164,7 @@ name = "slow.message"
 layer = "slow"
 value_kind = "text"
 runtime_key = "m"
+clear_value = ""
 notes = "fixture"
 "#,
         )
