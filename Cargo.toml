@@ -2,6 +2,7 @@
 name = "vsn1-cli"
 version = "0.1.0"
 edition = "2021"
+license-file = "LICENSE"
 
 [lib]
 name = "vsn1_cli"
