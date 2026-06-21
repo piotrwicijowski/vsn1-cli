@@ -553,18 +553,6 @@ where
     let layer = registry.layer(layer)?.name().clone();
     let lua = compile_activate_lua(&layer)?;
 
-    let Some(lua) = lua else {
-        return execute_curated_screen_noop(
-            discovery,
-            transport_factory,
-            target_args,
-            &format!(
-                "No immediate activation helper send was required for layer `{}` under the current fixed runtime contract.",
-                layer.as_str()
-            ),
-        );
-    };
-
     execute_curated_screen_lua(
         discovery,
         transport_factory,
@@ -572,27 +560,6 @@ where
         &lua,
         "screen activation command",
     )
-}
-
-fn execute_curated_screen_noop<D, F>(
-    discovery: &D,
-    transport_factory: &mut F,
-    target_args: &TargetArgs,
-    note: &str,
-) -> Result<String>
-where
-    D: DeviceDiscovery,
-    F: SerialTransportFactory,
-{
-    let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
-    let _transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
-
-    Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\n{note}\n",
-        protocol::GRID_BAUD_RATE,
-    ))
 }
 
 fn execute_curated_screen_lua<D, F>(
@@ -1656,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_activate_persistent_is_a_runtime_validated_noop_for_the_current_fixed_contract() {
+    fn screen_activate_persistent_sends_the_generic_activation_helper() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],
             error: None,
@@ -1673,7 +1640,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.contains("No immediate activation helper send was required for layer `persistent` under the current fixed runtime contract."));
+        assert!(output.contains("Sent screen activation command over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
     }
 

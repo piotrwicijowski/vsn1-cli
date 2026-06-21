@@ -1935,7 +1935,7 @@ runtime_marker = "fixture:first"
         .unwrap_err();
 
         assert!(error.to_string().contains(
-            "post-install bundled runtime 2026-06-17-screen-first.8 is not an exact match"
+            "post-install bundled runtime 2026-06-21-manifest-layers.1 is not an exact match"
         ));
         assert!(error
             .to_string()
@@ -1949,7 +1949,7 @@ runtime_marker = "fixture:first"
         write_runtime_fixture(
             fixture.path(),
             "current",
-            "2026-06-17-screen-first.8",
+            "2026-06-21-manifest-layers.1",
             "return 'current draw'\n",
         );
         write_runtime_fixture(

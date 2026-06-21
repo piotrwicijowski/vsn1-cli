@@ -1,11 +1,11 @@
-bundle_version = "2026-06-17-screen-first.8"
+bundle_version = "2026-06-21-manifest-layers.1"
 compatibility_reference = "POC-confirmed LCD owned slots at page 0 / element 13 / events 0 and 8, with live IMMEDIATE calls framed as <?lua ... ?>"
-runtime_marker = "vsn1-cli:2026-06-17-screen-first.8"
+runtime_marker = "vsn1-cli:2026-06-21-manifest-layers.1"
 
 compatibility_notes = [
   "This bundled contract owns only the LCD init and LCD draw slots discovered in the validated POC.",
   "The stored state shape is grounded in the confirmed update_param(...) argument layout plus the layered field names accepted by the plan.",
-  "This revision keeps the restored temporary-layer activation logic and changes the slow overlay visual from a white-filled panel to a dark filled panel with a white border so the text remains legible."
+  "This revision keeps the confirmed persistent/slow/fast visuals while rewriting the stored runtime helper contract to generic set_field(layer,key,value) and activate_layer(layer) entrypoints backed by manifest-declared layer state."
 ]
 
 [[layers]]
@@ -35,7 +35,7 @@ element = 13
 event = 0
 asset = "lcd-init.lua"
 install_order = 10
-runtime_marker = "vsn1-cli:2026-06-17-screen-first.8:lcd-init"
+runtime_marker = "vsn1-cli:2026-06-21-manifest-layers.1:lcd-init"
 
 [[owned_slots]]
 name = "lcd-draw"
@@ -44,7 +44,7 @@ element = 13
 event = 8
 asset = "lcd-draw.lua"
 install_order = 20
-runtime_marker = "vsn1-cli:2026-06-17-screen-first.8:lcd-draw"
+runtime_marker = "vsn1-cli:2026-06-21-manifest-layers.1:lcd-draw"
 
 [[fields]]
 name = "persistent.title"

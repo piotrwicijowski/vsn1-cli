@@ -247,17 +247,17 @@ Do not try to support both the old fixed-helper runtime contract and the new gen
 
 ### Step 19: Replace hard-coded host compiler layer logic
 
-- [ ] Introduce a generic runtime helper contract for field updates and activation.
-- [ ] Remove persistent/slow/fast-specific compile branches from `screen.rs`.
-- [ ] Keep field-type validation and clear-value handling manifest-driven.
-- [ ] Add regression tests for generic set, clear, and set-and-activate compilation.
+- [x] Introduce a generic runtime helper contract for field updates and activation.
+- [x] Remove persistent/slow/fast-specific compile branches from `screen.rs`.
+- [x] Keep field-type validation and clear-value handling manifest-driven.
+- [x] Add regression tests for generic set, clear, and set-and-activate compilation.
 
 ### Step 20: Rewrite the default runtime to the generic layer engine
 
-- [ ] Rewrite `assets/runtimes/default/lcd-init.lua` and any dependent runtime assets to use manifest-defined layer tables.
-- [ ] Preserve the current visible behavior using explicit manifest layer declarations.
-- [ ] Keep the rewritten runtime under the Grid CONFIG size limit.
-- [ ] Add tests or fixture coverage for the new default runtime manifest and helper contract.
+- [x] Rewrite `assets/runtimes/default/lcd-init.lua` and any dependent runtime assets to use manifest-defined layer tables.
+- [x] Preserve the current visible behavior using explicit manifest layer declarations.
+- [x] Keep the rewritten runtime under the Grid CONFIG size limit.
+- [x] Add tests or fixture coverage for the new default runtime manifest and helper contract.
 
 ### Step 21: Validate manifest-defined layers end to end
 
@@ -268,12 +268,12 @@ Do not try to support both the old fixed-helper runtime contract and the new gen
 
 ## Recommended next-session starting point
 
-Start with Step 18.
+Start with Step 21.
 
 Specifically:
 
-1. continue with runtime-driven CLI layer parsing and activation validation
-2. allow persistent-layer activation in the runtime-driven model
-3. preserve the new manifest rule that one or more persistent layers are valid
+1. update README and CLI help text so they stop implying fixed layer names or the removed `update_param(...)` helper contract
+2. run the remaining software verification for the manifest-defined layer follow-up, including the macOS cross-target checks
+3. perform and record the required hardware validation for persistent-base switching, temporary-layer priority, timeout expiry, fallback, and timer restart
 
-Do not start with the Lua rewrite first. The manifest contract needs to be stable before the host compiler and device runtime are rewritten around it.
+Do not add a long-lived compatibility bridge for both helper contracts. The host compiler is now on the generic contract, so the default runtime should be rewritten directly to match it.

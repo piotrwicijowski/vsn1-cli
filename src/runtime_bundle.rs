@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
 
-pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-17-screen-first.8";
+pub const BUNDLED_RUNTIME_VERSION: &str = "2026-06-21-manifest-layers.1";
 pub const BUNDLED_RUNTIME_NAME: &str = "default";
 
 const BUNDLED_RUNTIME_ROOT: &str = "assets/runtimes";
@@ -616,6 +616,40 @@ runtime_marker = "fixture:lcd-init"
             .fields
             .iter()
             .any(|field| field.name == "fast.action"));
+        assert_eq!(
+            bundle
+                .manifest()
+                .layers
+                .iter()
+                .map(|layer| layer.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["persistent", "slow", "fast"]
+        );
+    }
+
+    #[test]
+    fn bundled_runtime_uses_generic_layer_helpers_within_config_limit() {
+        let bundle = RuntimeBundle::bundled().unwrap();
+        let init = bundle
+            .assets()
+            .iter()
+            .find(|asset| asset.slot.name == "lcd-init")
+            .unwrap();
+        let draw = bundle
+            .assets()
+            .iter()
+            .find(|asset| asset.slot.name == "lcd-draw")
+            .unwrap();
+
+        assert!(init.normalized_content.contains("function set_field("));
+        assert!(init.normalized_content.contains("function activate_layer("));
+        assert!(!init.normalized_content.contains("update_param="));
+        assert!(draw.normalized_content.contains("local l,p,e=z.b,z.l,z.u"));
+        assert!(draw.normalized_content.contains("for i=1,#z.o do"));
+
+        for asset in bundle.assets() {
+            assert!(frame_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
+        }
     }
 
     #[test]

@@ -45,9 +45,6 @@ pub enum ScreenError {
         field: String,
         field_layer: ScreenLayer,
     },
-    UnsupportedActivationLayer {
-        layer: ScreenLayer,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -149,11 +146,6 @@ impl fmt::Display for ScreenError {
                 activate.as_str(),
                 field_layer.as_str()
             ),
-            Self::UnsupportedActivationLayer { layer } => write!(
-                f,
-                "the current fixed runtime helper contract does not yet support activating manifest layer `{}`",
-                layer.as_str()
-            ),
         }
     }
 }
@@ -169,8 +161,7 @@ impl StdError for ScreenError {
             | Self::InvalidValue { .. }
             | Self::DuplicateFieldAssignment { .. }
             | Self::InstalledRuntimeMissing
-            | Self::InvalidActivationMix { .. }
-            | Self::UnsupportedActivationLayer { .. } => None,
+            | Self::InvalidActivationMix { .. } => None,
         }
     }
 }
@@ -442,28 +433,13 @@ pub fn compile_set_lua(
 ) -> Result<String> {
     validate_assignments(assignments, activate)?;
 
-    let mut statements = Vec::new();
-
-    let persistent = assignments
+    let mut statements = assignments
         .iter()
-        .filter(|assignment| assignment.field.layer.as_str() == "persistent")
-        .cloned()
+        .map(compile_field_update)
         .collect::<Vec<_>>();
-    if !persistent.is_empty() {
-        statements.push(compile_persistent_update(&persistent)?);
-    }
-
-    for assignment in assignments
-        .iter()
-        .filter(|assignment| assignment.field.layer.as_str() != "persistent")
-    {
-        statements.push(compile_overlay_update(assignment)?);
-    }
 
     if let Some(layer) = activate {
-        if let Some(statement) = compile_activate_lua(layer)? {
-            statements.push(statement);
-        }
+        statements.push(compile_activate_lua(layer)?);
     }
 
     Ok(statements.join(";"))
@@ -473,15 +449,11 @@ pub fn compile_clear_lua(registry: &ScreenFieldRegistry, layer: &ScreenLayer) ->
     compile_set_lua(&registry.clear_plan(layer), None)
 }
 
-pub fn compile_activate_lua(layer: &ScreenLayer) -> Result<Option<String>> {
-    match layer.as_str() {
-        "slow" => Ok(Some("A(5)".to_string())),
-        "fast" => Ok(Some("A(1)".to_string())),
-        "persistent" => Ok(None),
-        _ => Err(ScreenError::UnsupportedActivationLayer {
-            layer: layer.clone(),
-        }),
-    }
+pub fn compile_activate_lua(layer: &ScreenLayer) -> Result<String> {
+    Ok(format!(
+        "activate_layer({})",
+        quote_lua_string(layer.as_str())
+    ))
 }
 
 fn build_field_spec(runtime_field: &RuntimeFieldSpec) -> Result<ScreenFieldSpec> {
@@ -633,77 +605,13 @@ fn validate_assignments(
     Ok(())
 }
 
-fn compile_persistent_update(assignments: &[ScreenAssignment]) -> Result<String> {
-    let mut args = [
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-        String::from("nil"),
-    ];
-    let mut clamp_min = None;
-    let mut clamp_max = None;
-
-    for assignment in assignments {
-        match assignment.field.runtime_key.as_str() {
-            "v" => args[0] = compile_lua_value(&assignment.value),
-            "n" => args[1] = compile_lua_value(&assignment.value),
-            "x" => args[2] = compile_lua_value(&assignment.value),
-            "t" => args[3] = compile_lua_value(&assignment.value),
-            "b" => args[4] = compile_lua_value(&assignment.value),
-            "s" => args[5] = compile_lua_value(&assignment.value),
-            "d" => args[6] = compile_lua_value(&assignment.value),
-            "i" => args[7] = compile_lua_value(&assignment.value),
-            "l" => clamp_min = Some(compile_lua_value(&assignment.value)),
-            "h" => clamp_max = Some(compile_lua_value(&assignment.value)),
-            "k" => args[9] = compile_lua_value(&assignment.value),
-            runtime_key => {
-                return Err(ScreenError::InvalidRuntimeFieldSpec {
-                    field: assignment.field.public_name.clone(),
-                    message: format!(
-                    "unsupported persistent runtime key `{runtime_key}` for host Lua compilation"
-                ),
-                })
-            }
-        }
-    }
-
-    if clamp_min.is_some() || clamp_max.is_some() {
-        args[8] = format!(
-            "{{{},{}}}",
-            clamp_min.unwrap_or_else(|| "nil".to_string()),
-            clamp_max.unwrap_or_else(|| "nil".to_string())
-        );
-    }
-
-    Ok(format!("P({})", args.join(",")))
-}
-
-fn compile_overlay_update(assignment: &ScreenAssignment) -> Result<String> {
-    match (
-        assignment.field.layer.as_str(),
-        assignment.field.runtime_key.as_str(),
-        &assignment.value,
-    ) {
-        ("slow", "m", ScreenValue::Text(_)) => {
-            Ok(format!("S({})", compile_lua_value(&assignment.value)))
-        }
-        ("fast", "a", ScreenValue::Text(_)) => {
-            Ok(format!("F({})", compile_lua_value(&assignment.value)))
-        }
-        (layer, runtime_key, _) => Err(ScreenError::InvalidRuntimeFieldSpec {
-            field: assignment.field.public_name.clone(),
-            message: format!(
-                "unsupported {}-layer runtime mapping `{runtime_key}` for host Lua compilation",
-                layer
-            ),
-        }),
-    }
+fn compile_field_update(assignment: &ScreenAssignment) -> String {
+    format!(
+        "set_field({},{},{})",
+        quote_lua_string(assignment.field.layer.as_str()),
+        quote_lua_string(assignment.field.runtime_key.as_str()),
+        compile_lua_value(&assignment.value)
+    )
 }
 
 fn compile_lua_value(value: &ScreenValue) -> String {
@@ -934,7 +842,10 @@ notes = "fixture"
 
         let lua = compile_set_lua(&assignments, None).unwrap();
 
-        assert_eq!(lua, "P(42,nil,nil,'Hello',nil,nil,nil,nil,{true,nil},nil)");
+        assert_eq!(
+            lua,
+            "set_field('persistent','t','Hello');set_field('persistent','v',42);set_field('persistent','l',true)"
+        );
     }
 
     #[test]
@@ -952,12 +863,12 @@ notes = "fixture"
 
         assert_eq!(
             lua,
-            "P(nil,nil,nil,'Hello',nil,nil,nil,nil,nil,nil);S('Disk almost full');F('Tap')"
+            "set_field('persistent','t','Hello');set_field('slow','m','Disk almost full');set_field('fast','a','Tap')"
         );
     }
 
     #[test]
-    fn compiles_overlay_only_updates_with_dirty_marking() {
+    fn compiles_single_layer_updates_with_generic_runtime_helpers() {
         let registry = ScreenFieldRegistry::bundled().unwrap();
         let assignments = registry
             .parse_assignments(["slow.message=Disk almost full"])
@@ -965,7 +876,22 @@ notes = "fixture"
 
         let lua = compile_set_lua(&assignments, None).unwrap();
 
-        assert_eq!(lua, "S('Disk almost full')");
+        assert_eq!(lua, "set_field('slow','m','Disk almost full')");
+    }
+
+    #[test]
+    fn compiles_set_and_activate_with_the_generic_layer_contract() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+        let assignments = registry
+            .parse_assignments(["slow.message=Disk almost full"])
+            .unwrap();
+
+        let lua = compile_set_lua(&assignments, Some(&ScreenLayer::new("slow"))).unwrap();
+
+        assert_eq!(
+            lua,
+            "set_field('slow','m','Disk almost full');activate_layer('slow')"
+        );
     }
 
     #[test]
@@ -991,32 +917,30 @@ notes = "fixture"
         let slow_lua = compile_clear_lua(&registry, &ScreenLayer::new("slow")).unwrap();
         let persistent_lua = compile_clear_lua(&registry, &ScreenLayer::new("persistent")).unwrap();
 
-        assert_eq!(slow_lua, "S('')");
+        assert_eq!(slow_lua, "set_field('slow','m','')");
         assert_eq!(
             persistent_lua,
-            "P(0,0,127,'','',0,-1,{'---','---','---','---','---','---','---','---'},{false,false},0)"
+            "set_field('persistent','t','');set_field('persistent','b','');set_field('persistent','v',0);set_field('persistent','n',0);set_field('persistent','x',127);set_field('persistent','d',-1);set_field('persistent','s',0);set_field('persistent','i',{'---','---','---','---','---','---','---','---'});set_field('persistent','l',false);set_field('persistent','h',false);set_field('persistent','k',0)"
         );
     }
 
     #[test]
-    fn compiles_current_fixed_runtime_activation_helpers() {
+    fn compiles_generic_runtime_activation_helpers() {
         assert_eq!(
             compile_activate_lua(&ScreenLayer::new("slow")).unwrap(),
-            Some("A(5)".to_string())
+            "activate_layer('slow')"
         );
         assert_eq!(
             compile_activate_lua(&ScreenLayer::new("fast")).unwrap(),
-            Some("A(1)".to_string())
+            "activate_layer('fast')"
         );
         assert_eq!(
             compile_activate_lua(&ScreenLayer::new("persistent")).unwrap(),
-            None
+            "activate_layer('persistent')"
         );
-
-        let error = compile_activate_lua(&ScreenLayer::new("alt")).unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "the current fixed runtime helper contract does not yet support activating manifest layer `alt`"
+            compile_activate_lua(&ScreenLayer::new("alt")).unwrap(),
+            "activate_layer('alt')"
         );
     }
 
