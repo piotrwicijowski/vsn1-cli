@@ -298,18 +298,20 @@ fn encode_packet(
 }
 
 fn encode_script_bytes(script: &str) -> Result<Vec<u8>> {
-    if !script.is_ascii() {
-        return Err(ProtocolError::NonAsciiLua);
-    }
+    let script_bytes: Vec<u8> = script
+        .chars()
+        .filter(|ch| ch.is_ascii())
+        .map(|ch| ch as u8)
+        .collect();
 
-    if script.len() >= GRID_MAX_LUA_BYTES {
+    if script_bytes.len() >= GRID_MAX_LUA_BYTES {
         return Err(ProtocolError::LuaTooLong {
-            length: script.len(),
+            length: script_bytes.len(),
             max_length: GRID_MAX_LUA_BYTES - 1,
         });
     }
 
-    Ok(script.as_bytes().to_vec())
+    Ok(script_bytes)
 }
 
 fn grid_coordinate_to_wire(axis: &'static str, value: i16) -> Result<usize> {
@@ -400,15 +402,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_ascii_lua() {
-        let error = encode_immediate_packet(&ImmediateWrite {
+    fn strips_non_ascii_lua_before_encoding() {
+        let packet = encode_immediate_packet(&ImmediateWrite {
             target: GridTarget::BROADCAST,
             lua: "snowman = '☃'",
             identity: PacketIdentity::new(0, 1),
         })
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error, ProtocolError::NonAsciiLua,);
+        assert_eq!(
+            immediate_payload(&packet),
+            b"<?lua --[[@cb]] snowman = '' ?>"
+        );
     }
 
     #[test]

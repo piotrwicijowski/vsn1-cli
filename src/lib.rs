@@ -1528,8 +1528,14 @@ mod tests {
     }
 
     #[test]
-    fn screen_raw_surfaces_protocol_errors() {
-        let error = execute_cli(
+    fn screen_raw_strips_non_ascii_before_sending() {
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut transport_factory = RecordingTransportFactory::default();
+
+        let output = execute_cli(
             Cli {
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
@@ -1538,17 +1544,19 @@ mod tests {
                     },
                 }),
             },
-            &StaticDiscovery {
-                devices: vec![test_device("/dev/ttyACM0")],
-                error: None,
-            },
-            &mut FakeTransportFactory::default(),
+            &discovery,
+            &mut transport_factory,
         )
-        .unwrap_err();
+        .unwrap();
 
+        assert!(output.contains("Module target: broadcast"));
+        assert_eq!(transport_factory.open_calls.len(), 1);
+
+        let writes = transport_factory.immediate_writes();
+        let packet = &writes[0];
         assert_eq!(
-            error.to_string(),
-            "the current Grid packet encoder supports ASCII Lua only"
+            &packet[32..packet.len() - 5],
+            b"<?lua --[[@cb]] snowman = '' ?>"
         );
     }
 

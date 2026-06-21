@@ -22,7 +22,7 @@ pub fn send_screen_raw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{frame_lua, ProtocolError};
+    use crate::protocol::frame_lua;
     use crate::transport::{FakeTransport, TransportError};
 
     #[test]
@@ -42,13 +42,15 @@ mod tests {
     }
 
     #[test]
-    fn send_screen_raw_surfaces_protocol_errors() {
+    fn send_screen_raw_strips_non_ascii_before_sending() {
         let mut transport = FakeTransport::default();
 
-        let error =
-            send_screen_raw(&mut transport, GridTarget::BROADCAST, "snowman = '☃'").unwrap_err();
+        send_screen_raw(&mut transport, GridTarget::BROADCAST, "snowman = '☃'").unwrap();
 
-        assert_eq!(error.to_string(), ProtocolError::NonAsciiLua.to_string());
+        let packet = &transport.immediate_writes()[0];
+        let payload = &packet[32..packet.len() - 5];
+
+        assert_eq!(payload, b"<?lua --[[@cb]] snowman = '' ?>");
     }
 
     #[test]
