@@ -32,7 +32,7 @@ use crate::transport::{SerialTransportFactory, SystemTransportFactory};
 
 pub use error::{Error, Result};
 
-const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install <name>` to provision a discovered runtime that the curated layered `screen` helpers expect.";
+const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install <name>` to provision a discovered runtime that the curated runtime-defined layered `screen` helpers expect.";
 const DEVICE_INFO_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --dx 0 --dy 0";
 const RUNTIME_LIST_AFTER_HELP: &str = "Lists discovered runtime names and the source copy that won resolution. Discovery precedence is dev > user > system on directory-name collisions.";
@@ -44,12 +44,12 @@ const RUNTIME_REPAIR_AFTER_HELP: &str =
 const RUNTIME_REMOVE_AFTER_HELP: &str =
     "Restores the pre-install backup when available, otherwise clears the frozen runtime's owned slots with a warning, then removes ~/.config/vsn1-cli/runtime.";
 const RUNTIME_STATUS_AFTER_HELP: &str = "Shows the owned-slot inspection result relative to the frozen installed runtime copy when one is present locally.";
-const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set fast.action=Tap --activate fast --dx 0 --dy 0\n\nCurated screen fields and layer names are loaded from the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
+const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set fast.action=Tap --activate fast --dx 0 --dy 0\n\nExamples use the shipped `default` runtime. Curated screen fields and layer names are loaded from the frozen installed runtime copy under ~/.config/vsn1-cli/runtime, so other runtimes may declare different names.";
 const SCREEN_CLEAR_AFTER_HELP: &str =
-    "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0\n\nLayer names are validated against the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
-const SCREEN_RAW_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen raw \"return update_param('t', 'Hello')\"\n  vsn1-cli screen raw \"lcd:ldrr(0,0,128,64); lcd:ldsw()\" --dx 0 --dy 0\n\n`screen raw` bypasses the curated field registry and runtime-shape validation.";
+    "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0\n\nExamples use the shipped `default` runtime. Layer names are validated against the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
+const SCREEN_RAW_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen raw \"set_field('persistent','t','Hello')\"\n  vsn1-cli screen raw \"lcd:ldrr(0,0,128,64); lcd:ldsw()\" --dx 0 --dy 0\n\n`screen raw` bypasses the curated field registry and runtime-shape validation and can call whatever helper surface the installed runtime exposes.";
 const SCREEN_ACTIVATE_AFTER_HELP: &str =
-    "Examples:\n  vsn1-cli screen activate persistent\n  vsn1-cli screen activate slow\n  vsn1-cli screen activate fast --dx 0 --dy 0\n\n`screen activate` validates layer names against the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
+    "Examples:\n  vsn1-cli screen activate persistent\n  vsn1-cli screen activate slow\n  vsn1-cli screen activate fast --dx 0 --dy 0\n\nExamples use the shipped `default` runtime. `screen activate` validates layer names against the frozen installed runtime copy under ~/.config/vsn1-cli/runtime. Persistent-layer activation switches the active base layer; temporary-layer activation starts or restarts that layer's timeout.";
 
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(

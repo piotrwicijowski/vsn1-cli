@@ -10,7 +10,7 @@ This project is intentionally screen-first and one-shot only. The CLI provisions
 - macOS support is a target, but host-side validation is still in progress.
 - Curated public commands are grouped under `device`, `runtime`, and `screen`.
 - Curated screen mutations load their field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
-- The current shipped runtime model is still the fixed `persistent` / `slow` / `fast` layout. The planned manifest-defined layer follow-up will allow one or more persistent layers, where the most recently activated persistent layer becomes the active base layer; that behavior is not implemented end-to-end yet.
+- Curated `screen` commands now use manifest-defined layer inventory from the frozen installed runtime copy. The shipped `default` runtime currently declares `persistent`, `slow`, and `fast`, but other runtimes may declare different layer names and activation behavior.
 
 ## Install And Build
 
@@ -106,39 +106,41 @@ Runtime lifecycle persistence:
 
 ## Screen Commands
 
-Set curated persistent fields:
+Examples below use the shipped `default` runtime, which declares `persistent`, `slow`, and `fast`.
+
+Set curated fields on the current default runtime's persistent base layer:
 
 ```bash
 cargo run -- screen set persistent.title=Tempo persistent.value=64
 ```
 
-Set and activate the `slow` overlay:
+Set and activate the current default runtime's `slow` temporary layer:
 
 ```bash
 cargo run -- screen set slow.message='Disk almost full' --activate slow
 ```
 
-Set and activate the `fast` overlay on an explicit target:
+Set and activate the current default runtime's `fast` temporary layer on an explicit target:
 
 ```bash
 cargo run -- screen set fast.action=Tap --activate fast --dx 0 --dy 0
 ```
 
-Clear a specific layer:
+Clear a specific manifest-declared layer:
 
 ```bash
 cargo run -- screen clear persistent
 cargo run -- screen clear slow
 ```
 
-Activate a temporary layer without changing its stored values:
+Activate a manifest-declared layer without changing its stored values:
 
 ```bash
 cargo run -- screen activate slow
 cargo run -- screen activate fast
 ```
 
-`screen activate` now requires the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`, just like `screen set` and `screen clear`.
+`screen activate` now requires the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`, just like `screen set` and `screen clear`. Activating a persistent layer switches the active base layer; activating a temporary layer starts or restarts that layer's timeout.
 
 Send expert-facing raw Lua:
 
@@ -162,10 +164,13 @@ Current default-runtime curated fields:
 - `slow.message`
 - `fast.action`
 
+Curated `screen` commands compile to the generic runtime helper contract used by the shipped default runtime: `set_field(layer_name, runtime_key, value)` and `activate_layer(layer_name)`.
+
 ## Runtime Compatibility Rules
 
 - Curated `screen set`, `screen clear`, and `screen activate` commands send immediate runtime-helper Lua without a preflight exact-match verification step.
 - `screen set` and `screen clear` load their curated field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
+- Curated `screen` compilation is layer-inventory-driven and targets the generic `set_field(...)` / `activate_layer(...)` helper contract used by the shipped default runtime.
 - `runtime install <name>` is the supported way to provision the runtime that curated helpers target.
 - `screen raw` bypasses curated field validation and runtime-shape compilation, but still uses the same transport and packet framing path.
 - Runtime lifecycle commands only touch the manifest-owned slots.

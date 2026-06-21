@@ -261,19 +261,18 @@ Do not try to support both the old fixed-helper runtime contract and the new gen
 
 ### Step 21: Validate manifest-defined layers end to end
 
-- [ ] Update README/help text for dynamic layer names.
-- [ ] Run `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, and `cargo check --target aarch64-apple-darwin`.
-- [ ] Run hardware validation on a real device for dynamic layer priority, activation, timeout, fallback, and reactivation behavior.
-- [ ] Record the results in `docs/validation-matrix.md` and `08-implementation-checklist.md`.
+- [x] Update README/help text for dynamic layer names.
+- [x] Run `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, and `cargo check --target aarch64-apple-darwin`.
+- [x] Run hardware validation on a real device for dynamic layer priority, activation, timeout, fallback, and reactivation behavior.
+- [x] Record the results in `docs/validation-matrix.md` and `08-implementation-checklist.md`.
 
 ## Recommended next-session starting point
 
-Start with Step 21.
+Step 21 is complete for the shipped `default` runtime.
 
 Specifically:
 
-1. update README and CLI help text so they stop implying fixed layer names or the removed `update_param(...)` helper contract
-2. run the remaining software verification for the manifest-defined layer follow-up, including the macOS cross-target checks
-3. perform and record the required hardware validation for persistent-base switching, temporary-layer priority, timeout expiry, fallback, and timer restart
+1. if future runtime work adds multiple persistent layers to a real validation target, run a dedicated hardware pass for persistent-to-persistent base switching
+2. otherwise continue with the next planned runtime or screen follow-up from the main implementation checklist
 
 Do not add a long-lived compatibility bridge for both helper contracts. The host compiler is now on the generic contract, so the default runtime should be rewritten directly to match it.

@@ -13,12 +13,12 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 ## Session handoff state
 
 - Overall status: `in_progress`
-- Last completed step: `step 20`
+- Last completed step: `step 21`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-21 after step 20 rewrote the default runtime Lua assets to the generic manifest-defined layer engine, updated the bundled runtime version/markers, added regression coverage for the new helper contract, and kept both owned LCD scripts under the Grid CONFIG payload limit)`
-- Last hardware validation: `2026-06-20 on Linux host: step 15 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default succeeded with resolved runtime default (dev); runtime remove restored the pre-install owned slots successfully; reinstall followed by runtime remove with the pre-install backup unavailable cleared the owned slots and printed the expected warning fallback message.`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-21 after step 21 updated README/help text for runtime-defined layer names, replaced the stale raw-helper examples with the generic helper contract, and confirmed Linux plus both macOS target triples still build cleanly)`
+- Last hardware validation: `2026-06-21 on Linux host: step 21 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default, runtime verify, and runtime status all reported exact-match compatible on installed runtime 2026-06-21-manifest-layers.1; screen set/activate validation confirmed persistent activation acceptance, slow/fast activation, fast-over-slow temporary priority, fallback from fast to slow to persistent, slow and fast timer restart behavior, lower-layer non-preemption while a higher layer remained active, and successful screen clear fallback for slow and fast.`
 - Open blockers: `none`
-- Next session start point: `continue manifest-defined layer follow-up at .plan/10-manifest-defined-runtime-layers-plan.md step 21; update README/help text for dynamic layer names, run the cross-target checks, then do the required hardware validation for manifest-defined layer activation, timeout, priority, and fallback behavior`
+- Next session start point: `manifest-defined layer follow-up step 21 is complete; if future validation needs explicit persistent-to-persistent base switching coverage, use a runtime that declares multiple persistent layers, otherwise continue from the next item in the main implementation plan`
 
 ## Rules for every step
 
@@ -211,6 +211,7 @@ Update this section as work lands.
 - Step 18: `completed on 2026-06-21 - replaced compile-time CLI layer enums with runtime-validated string layer names, taught the screen registry to load manifest layer inventory and validate layer names at runtime, allowed screen clear and screen activate to resolve declared manifest layers from the installed runtime copy, added persistent-layer activation success coverage for the current fixed contract where activating the default persistent layer is a validated no-op, and updated help text plus regression coverage for unknown layers and dynamic layer parsing`
 - Step 19: `completed on 2026-06-21 - replaced the remaining persistent/slow/fast-specific host compiler branches with generic set_field(layer, runtime_key, value) and activate_layer(layer) helper calls, removed the fixed persistent activation no-op path so all declared layers now compile through the same host contract, and added regression coverage for generic set, clear, activate, and set-and-activate Lua compilation`
 - Step 20: `completed on 2026-06-21 - rewrote the default runtime manifest/assets to the generic manifest-defined layer engine, replaced the old fixed P/S/F/A helper surface with generic set_field(...) and activate_layer(...) entrypoints backed by layer tables plus an active persistent base, preserved the current persistent/slow/fast visuals and timeout behavior, trimmed the lcd-draw asset back under the Grid CONFIG payload limit, and added regression coverage for the bundled runtime helper contract and payload-budget enforcement`
+- Step 21: `completed on 2026-06-21 - updated README/help text for runtime-defined layer names and the generic helper contract, re-ran Linux plus macOS cross-target verification, and recorded real-device validation on /dev/ttyACM0 at dx=0 dy=0 covering runtime install/verify/status exact-match behavior, persistent activation acceptance, slow/fast activation, temporary priority, timeout expiry, fallback, timer restart, lower-layer non-preemption, and slow/fast clear fallback for the shipped default runtime`
 
 ## Recommended session workflow
 
@@ -224,4 +225,4 @@ Update this section as work lands.
 
 1. For future work to make runtime layers manifest-defined instead of fixed to `persistent`, `slow`, and `fast`, use `10-manifest-defined-runtime-layers-plan.md` as the starting point.
 2. The manifest-defined layer follow-up now assumes one or more persistent layers are valid and that the most recently activated persistent layer should become the active base layer.
-3. Step 21 is now the next implementation target because the default runtime now matches the generic host helper contract, but the user-facing docs/help text and hardware validation still need to be updated and recorded for manifest-defined layers.
+3. The manifest-defined layer follow-up is complete for the shipped default runtime; future hardware coverage for persistent-to-persistent base switching will require a runtime that declares multiple persistent layers.
