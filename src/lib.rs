@@ -23,7 +23,7 @@ use crate::runtime::{
     RuntimeInspectionReport, RuntimeInstallReport, RuntimeRemoveReport, RuntimeSlotStatus,
     RuntimeUpgradeReport, TransportRuntimeSlotReader,
 };
-use crate::runtime_bundle::{resolve_runtime, DiscoveredRuntime};
+use crate::runtime_bundle::{discover_runtimes, resolve_runtime, DiscoveredRuntime};
 use crate::screen::{
     compile_activate_lua, compile_clear_lua, compile_set_lua, ScreenFieldRegistry,
     ScreenLayer as RegistryScreenLayer,
@@ -36,6 +36,7 @@ pub use error::{Error, Result};
 const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install <name>` to provision a discovered runtime that the curated layered `screen` helpers expect.";
 const DEVICE_INFO_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --dx 0 --dy 0";
+const RUNTIME_LIST_AFTER_HELP: &str = "Lists discovered runtime names and the source copy that won resolution. Discovery precedence is dev > user > system on directory-name collisions.";
 const RUNTIME_INSTALL_AFTER_HELP: &str = "Installs the selected discovered runtime into the manifest-owned slots, captures a pre-install backup under ~/.config/vsn1-cli/pre-install, freezes the runtime under ~/.config/vsn1-cli/runtime, and verifies an exact installed-runtime match.";
 const RUNTIME_VERIFY_AFTER_HELP: &str = "Fails unless every owned runtime slot matches the frozen installed runtime copy under ~/.config/vsn1-cli/runtime exactly.";
 const RUNTIME_UPGRADE_AFTER_HELP: &str = "Overwrites the device from the selected discovered runtime, refreshes the frozen runtime copy under ~/.config/vsn1-cli/runtime, and does not refresh the pre-install backup.";
@@ -49,7 +50,7 @@ const SCREEN_CLEAR_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0";
 const SCREEN_RAW_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen raw \"return update_param('t', 'Hello')\"\n  vsn1-cli screen raw \"lcd:ldrr(0,0,128,64); lcd:ldsw()\" --dx 0 --dy 0\n\n`screen raw` bypasses the curated field registry and runtime-shape validation.";
 const SCREEN_ACTIVATE_AFTER_HELP: &str =
-    "Examples:\n  vsn1-cli screen activate slow\n  vsn1-cli screen activate fast --dx 0 --dy 0";
+    "Examples:\n  vsn1-cli screen activate slow\n  vsn1-cli screen activate fast --dx 0 --dy 0\n\n`screen activate` requires the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
 
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(
@@ -104,6 +105,11 @@ pub struct RuntimeArgs {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum RuntimeCommand {
+    #[command(
+        about = "List discovered runtimes and their winning source copies",
+        after_help = RUNTIME_LIST_AFTER_HELP
+    )]
+    List,
     #[command(
         about = "Install a discovered runtime into the owned device slots",
         after_help = RUNTIME_INSTALL_AFTER_HELP
@@ -309,6 +315,7 @@ where
             }
         },
         TopLevelCommand::Runtime(args) => match args.command {
+            RuntimeCommand::List => execute_runtime_list(),
             RuntimeCommand::Install { name, target } => {
                 execute_runtime_install(discovery, transport_factory, &name, &target)
             }
@@ -369,6 +376,31 @@ fn render_device_list(discovery: &impl DeviceDiscovery) -> Result<String> {
     }
 
     Ok(output)
+}
+
+fn execute_runtime_list() -> Result<String> {
+    let runtimes = discover_runtimes()?;
+
+    if runtimes.is_empty() {
+        return Ok("No runtimes found in system, user, or dev runtime roots.\n".to_string());
+    }
+
+    Ok(render_runtime_list(&runtimes))
+}
+
+fn render_runtime_list(runtimes: &[DiscoveredRuntime]) -> String {
+    let mut output = String::from("Discovered runtimes:\n");
+
+    for runtime in runtimes {
+        output.push_str(&format!(
+            "- {} ({}) {}\n",
+            runtime.name,
+            runtime.source.as_str(),
+            runtime.path.display()
+        ));
+    }
+
+    output
 }
 
 fn render_device_info<D, F>(
@@ -509,6 +541,7 @@ where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
 {
+    let _registry = ScreenFieldRegistry::installed()?;
     let lua = compile_activate_lua(screen_layer_from_activation_layer(layer))?;
 
     execute_curated_screen_lua(
@@ -1078,6 +1111,26 @@ mod tests {
     }
 
     #[test]
+    fn runtime_list_renders_discovered_names_and_sources() {
+        let output = render_runtime_list(&[
+            DiscoveredRuntime {
+                name: "default".to_string(),
+                source: crate::runtime_bundle::RuntimeSource::Dev,
+                path: "/repo/assets/runtimes/default".into(),
+            },
+            DiscoveredRuntime {
+                name: "legacy".to_string(),
+                source: crate::runtime_bundle::RuntimeSource::System,
+                path: "/usr/share/vsn1-cli/runtimes/legacy".into(),
+            },
+        ]);
+
+        assert!(output.contains("Discovered runtimes:"));
+        assert!(output.contains("- default (dev) /repo/assets/runtimes/default"));
+        assert!(output.contains("- legacy (system) /usr/share/vsn1-cli/runtimes/legacy"));
+    }
+
+    #[test]
     fn screen_set_help_mentions_curated_assignments_and_activation() {
         let mut screen_command = command().find_subcommand("screen").unwrap().clone();
         let screen_help = screen_command.render_help().to_string();
@@ -1140,6 +1193,20 @@ mod tests {
                     command: RuntimeCommand::Verify {
                         target: TargetArgs::default(),
                     },
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_runtime_list() {
+        let cli = try_parse_from(["vsn1-cli", "runtime", "list"]).unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: TopLevelCommand::Runtime(RuntimeArgs {
+                    command: RuntimeCommand::List,
                 }),
             }
         );

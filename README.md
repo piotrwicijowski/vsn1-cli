@@ -46,6 +46,12 @@ Targeting rules:
 
 ## Runtime Commands
 
+List discovered runtimes and the source copy that won precedence:
+
+```bash
+cargo run -- runtime list
+```
+
 Install a discovered runtime into the manifest-owned slots:
 
 ```bash
@@ -130,6 +136,8 @@ Activate a temporary layer without changing its stored values:
 cargo run -- screen activate slow
 cargo run -- screen activate fast
 ```
+
+`screen activate` now requires the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`, just like `screen set` and `screen clear`.
 
 Send expert-facing raw Lua:
 

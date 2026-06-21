@@ -19,7 +19,7 @@
 - Reliable visible screen updates are currently budgeted at about `5-10` updates per second depending on payload shape.
 - The fast live path requires framed `IMMEDIATE` Lua payloads in the form `<?lua --[[@cb]] ... ?>`.
 - The current validated runtime contract owns only the LCD init and LCD draw slots identified in the POC.
-- Curated screen commands now take the same fast immediate-send path as `screen raw`; `screen set` and `screen clear` load their field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
+- Curated screen commands now take the same fast immediate-send path as `screen raw`; `screen set`, `screen clear`, and `screen activate` require the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`, and `screen set` / `screen clear` load their field metadata from that copy.
 
 ## Follow-Up Recording Rules
 

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
@@ -114,15 +113,6 @@ pub struct RuntimeRemoveReport {
     removed_slots: Vec<OwnedRuntimeSlot>,
     restored_from_backup: bool,
     warning: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RuntimeLifecycleState {
-    ExactCurrent,
-    ExactOlder { bundle_version: String },
-    Missing,
-    DriftedOrIncomplete,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -648,19 +638,6 @@ where
     Ok(report)
 }
 
-pub fn install_bundled_runtime<R>(
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-) -> Result<RuntimeInstallReport>
-where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
-{
-    let storage_root = required_runtime_config_root_dir()?;
-    let bundle = RuntimeBundle::bundled()?;
-
-    install_runtime_bundle_with_storage(&bundle, requested_target, reader, &storage_root, true)
-}
-
 pub fn install_runtime_with_bundle_dir<R>(
     bundle_dir: impl AsRef<Path>,
     requested_target: ResolvedTarget,
@@ -694,74 +671,6 @@ where
     )?;
 
     Ok(RuntimeUpgradeReport { install_report })
-}
-
-pub fn upgrade_bundled_runtime<R>(
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-) -> Result<RuntimeUpgradeReport>
-where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
-{
-    upgrade_runtime_with_bundle_dir(
-        crate::runtime_bundle::bundled_runtime_dir(),
-        requested_target,
-        reader,
-    )
-}
-
-#[allow(dead_code)]
-fn upgrade_runtime_bundle<R>(
-    current_bundle: &RuntimeBundle,
-    bundled_family: &[RuntimeBundle],
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-    storage_root: Option<&Path>,
-) -> Result<RuntimeUpgradeReport>
-where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
-{
-    match classify_runtime_lifecycle_state(
-        current_bundle,
-        bundled_family,
-        requested_target,
-        reader,
-    )? {
-        RuntimeLifecycleState::ExactCurrent => Err(RuntimeError::verification_failed(format!(
-            "bundled runtime {} is already installed exactly; runtime upgrade only applies to older managed bundle versions",
-            current_bundle.manifest().bundle_version
-        ))),
-        RuntimeLifecycleState::ExactOlder { bundle_version } => {
-            let install_report = match storage_root {
-                Some(storage_root) => install_runtime_bundle_with_storage(
-                    current_bundle,
-                    requested_target,
-                    reader,
-                    storage_root,
-                    false,
-                )?,
-                None => install_runtime_bundle(current_bundle, requested_target, reader)?,
-            };
-            let _ = bundle_version;
-            Ok(RuntimeUpgradeReport { install_report })
-        }
-        RuntimeLifecycleState::Missing => Err(RuntimeError::verification_failed(
-            "no managed bundled runtime content was detected in the owned slots; use `runtime install` for a fresh provision",
-        )),
-        RuntimeLifecycleState::DriftedOrIncomplete => Err(RuntimeError::verification_failed(
-            "the owned slots do not match an exact older bundled runtime; use `runtime repair` for drifted or partial managed content",
-        )),
-    }
-}
-
-pub fn repair_bundled_runtime<R>(
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-) -> Result<RuntimeInstallReport>
-where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
-{
-    repair_installed_runtime(requested_target, reader)
 }
 
 pub fn repair_installed_runtime<R>(
@@ -810,53 +719,6 @@ where
     }
 
     install_runtime_bundle_with_storage(&bundle, requested_target, reader, storage_root, false)
-}
-
-#[allow(dead_code)]
-fn repair_runtime_bundle<R>(
-    current_bundle: &RuntimeBundle,
-    bundled_family: &[RuntimeBundle],
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-    storage_root: Option<&Path>,
-) -> Result<RuntimeInstallReport>
-where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
-{
-    match classify_runtime_lifecycle_state(&current_bundle, &bundled_family, requested_target, reader)? {
-        RuntimeLifecycleState::ExactCurrent => Err(RuntimeError::verification_failed(format!(
-            "bundled runtime {} is already installed exactly; runtime repair is only for drifted or partial managed content",
-            current_bundle.manifest().bundle_version
-        ))),
-        RuntimeLifecycleState::ExactOlder { bundle_version } => {
-            Err(RuntimeError::verification_failed(format!(
-                "managed slots match older bundled runtime {bundle_version} exactly; use `runtime upgrade` instead of `runtime repair`"
-            )))
-        }
-        RuntimeLifecycleState::Missing => Err(RuntimeError::verification_failed(
-            "no managed bundled runtime content was detected in the owned slots; use `runtime install` for a fresh provision",
-        )),
-        RuntimeLifecycleState::DriftedOrIncomplete => match storage_root {
-            Some(storage_root) => install_runtime_bundle_with_storage(
-                &current_bundle,
-                requested_target,
-                reader,
-                storage_root,
-                false,
-            ),
-            None => install_runtime_bundle(current_bundle, requested_target, reader),
-        },
-    }
-}
-
-pub fn remove_bundled_runtime<R>(
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-) -> Result<RuntimeRemoveReport>
-where
-    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer + RuntimeSlotWriter,
-{
-    remove_installed_runtime(requested_target, reader)
 }
 
 pub fn remove_installed_runtime<R>(
@@ -1192,157 +1054,6 @@ fn remove_directory_if_exists(path: &Path) -> Result<()> {
 
 fn staging_dir_for(path: &Path) -> PathBuf {
     path.with_extension("tmp")
-}
-
-#[allow(dead_code)]
-fn classify_runtime_lifecycle_state<R>(
-    current_bundle: &RuntimeBundle,
-    bundled_family: &[RuntimeBundle],
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-) -> Result<RuntimeLifecycleState>
-where
-    R: RuntimeSlotReader,
-{
-    let current_report = inspect_runtime_bundle(current_bundle, requested_target, reader)?;
-    if current_report.is_exact_match() {
-        return Ok(RuntimeLifecycleState::ExactCurrent);
-    }
-
-    if current_report
-        .slot_inspections()
-        .iter()
-        .all(|inspection| matches!(inspection.status, RuntimeSlotStatus::Missing))
-    {
-        return Ok(RuntimeLifecycleState::Missing);
-    }
-
-    for bundle in bundled_family {
-        if bundle.manifest().bundle_version == current_bundle.manifest().bundle_version {
-            continue;
-        }
-
-        if inspect_runtime_bundle(bundle, requested_target, reader)?.is_exact_match() {
-            return Ok(RuntimeLifecycleState::ExactOlder {
-                bundle_version: bundle.manifest().bundle_version.clone(),
-            });
-        }
-    }
-
-    Ok(RuntimeLifecycleState::DriftedOrIncomplete)
-}
-
-#[allow(dead_code)]
-fn managed_slot_hashes_for_bundle(
-    bundle: &RuntimeBundle,
-    bundled_family: &[RuntimeBundle],
-) -> Result<BTreeMap<String, Vec<String>>> {
-    let mut managed_hashes = bundle
-        .assets()
-        .iter()
-        .map(|asset| (asset.slot.name.clone(), (asset.slot.clone(), Vec::new())))
-        .collect::<BTreeMap<_, _>>();
-
-    for historical_bundle in bundled_family {
-        let mut seen_slots = Vec::new();
-
-        for asset in historical_bundle.assets() {
-            let Some((expected_slot, known_hashes)) = managed_hashes.get_mut(&asset.slot.name)
-            else {
-                return Err(RuntimeError::verification_failed(format!(
-                    "historical bundled runtime {} includes unexpected owned slot {}",
-                    historical_bundle.manifest().bundle_version,
-                    asset.slot.name
-                )));
-            };
-
-            if expected_slot.page != asset.slot.page
-                || expected_slot.element != asset.slot.element
-                || expected_slot.event != asset.slot.event
-            {
-                return Err(RuntimeError::verification_failed(format!(
-                    "historical bundled runtime {} changed the owned location for {}",
-                    historical_bundle.manifest().bundle_version,
-                    asset.slot.name
-                )));
-            }
-
-            seen_slots.push(asset.slot.name.clone());
-            if !known_hashes.contains(&asset.normalized_sha256) {
-                known_hashes.push(asset.normalized_sha256.clone());
-            }
-        }
-
-        for expected_name in managed_hashes.keys() {
-            if !seen_slots
-                .iter()
-                .any(|seen_name| seen_name == expected_name)
-            {
-                return Err(RuntimeError::verification_failed(format!(
-                    "historical bundled runtime {} is missing owned slot {}",
-                    historical_bundle.manifest().bundle_version,
-                    expected_name
-                )));
-            }
-        }
-    }
-
-    Ok(managed_hashes
-        .into_iter()
-        .map(|(name, (_slot, hashes))| (name, hashes))
-        .collect())
-}
-
-#[allow(dead_code)]
-fn plan_runtime_remove<R>(
-    bundle: &RuntimeBundle,
-    managed_hashes: &BTreeMap<String, Vec<String>>,
-    requested_target: ResolvedTarget,
-    reader: &mut R,
-) -> Result<Vec<OwnedRuntimeSlot>>
-where
-    R: RuntimeSlotReader,
-{
-    let mut removable_slots = Vec::new();
-
-    for asset in bundle.assets() {
-        let Some(read) = reader.read_owned_slot(requested_target, &asset.slot)? else {
-            continue;
-        };
-
-        if let ResolvedTarget::Explicit(expected_target) = requested_target {
-            if read.source_target != expected_target {
-                return Err(RuntimeError::verification_failed(format!(
-                    "refusing to remove {} at {} because it responded from dx={} dy={} instead of the requested target",
-                    asset.slot.name,
-                    asset.slot.location_display(),
-                    read.source_target.dx,
-                    read.source_target.dy
-                )));
-            }
-        }
-
-        let actual_sha256 = normalized_sha256(&read.content);
-        let Some(known_hashes) = managed_hashes.get(&asset.slot.name) else {
-            return Err(RuntimeError::verification_failed(format!(
-                "no managed hash inventory was loaded for owned slot {}",
-                asset.slot.name
-            )));
-        };
-
-        if known_hashes.contains(&actual_sha256) {
-            removable_slots.push(asset.slot.clone());
-            continue;
-        }
-
-        return Err(RuntimeError::verification_failed(format!(
-            "refusing to remove {} at {} because its current content does not match any bundled managed runtime version",
-            asset.slot.name,
-            asset.slot.location_display()
-        )));
-    }
-
-    Ok(removable_slots)
 }
 
 fn verify_removed_slots<R>(
