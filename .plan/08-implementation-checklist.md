@@ -12,13 +12,13 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 
 ## Session handoff state
 
-- Overall status: `completed`
-- Last completed step: `step 16`
+- Overall status: `in_progress`
+- Last completed step: `step 18`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-20 after step 16 moved curated screen metadata loading to the frozen installed runtime copy, updated help/docs/validation notes for named runtimes and uninstall semantics, and added installed-runtime screen registry regression coverage)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-21 after step 18 replaced compile-time screen layer enums in the CLI with runtime-validated layer strings, loaded layer inventory from the installed runtime manifest, added runtime validation for screen clear/activate and screen set --activate, allowed persistent-layer activation through the runtime-driven CLI path, and added regression coverage for unknown layers plus persistent activation behavior under the current fixed helper contract)`
 - Last hardware validation: `2026-06-20 on Linux host: step 15 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default succeeded with resolved runtime default (dev); runtime remove restored the pre-install owned slots successfully; reinstall followed by runtime remove with the pre-install backup unavailable cleared the owned slots and printed the expected warning fallback message.`
 - Open blockers: `none`
-- Next session start point: `implementation checklist complete; begin new scoped work or follow-up hardware validation as needed`
+- Next session start point: `continue manifest-defined layer follow-up at .plan/10-manifest-defined-runtime-layers-plan.md step 19; replace the remaining fixed persistent/slow/fast compiler branches with the generic runtime helper contract needed for custom manifest layer names and multi-persistent activation semantics`
 
 ## Rules for every step
 
@@ -207,6 +207,8 @@ Update this section as work lands.
 - Step 14: `completed on 2026-06-20 - added ~/.config/vsn1-cli runtime storage helpers, froze successful installs/upgrades/repairs into ~/.config/vsn1-cli/runtime, captured pre-install owned-slot contents into a loadable ~/.config/vsn1-cli/pre-install bundle with empty-slot representation, added replacement semantics for both directories, and added regression coverage for backup capture and persistence replacement`
 - Step 15: `completed on 2026-06-20 - switched runtime install/upgrade to named runtime selection and runtime discovery resolution, changed remove/uninstall to backup-restore-or-clear semantics with frozen-runtime cleanup, added command and lifecycle regression coverage, and validated on Linux hardware at /dev/ttyACM0 for install default, remove restore, and fallback-to-clear remove behavior on dx=0 dy=0`
 - Step 16: `completed on 2026-06-20 - switched curated screen set/clear metadata loading from compile-time bundled assets to the frozen installed runtime copy, updated help text plus README and validation docs for the named-runtime lifecycle, added installed-runtime screen registry regression coverage, and reconfirmed Linux plus macOS cross-target build health`
+- Step 17: `completed on 2026-06-21 - added explicit manifest [[layers]] support and validation to runtime bundle loading, enforced that fields reference declared layers, updated the default runtime manifest to declare persistent/slow/fast explicitly, carried layer metadata into pre-install backup manifests, added regression coverage for invalid layer definitions and undeclared field-layer references, and then relaxed the persistent-layer rule to allow one or more persistent layers so the follow-up runtime model can support last-activated-persistent-layer-wins semantics`
+- Step 18: `completed on 2026-06-21 - replaced compile-time CLI layer enums with runtime-validated string layer names, taught the screen registry to load manifest layer inventory and validate layer names at runtime, allowed screen clear and screen activate to resolve declared manifest layers from the installed runtime copy, added persistent-layer activation success coverage for the current fixed contract where activating the default persistent layer is a validated no-op, and updated help text plus regression coverage for unknown layers and dynamic layer parsing`
 
 ## Recommended session workflow
 
@@ -215,3 +217,9 @@ Update this section as work lands.
 3. Run `cargo fmt --check`, `cargo test`, and `cargo check`.
 4. Run hardware validation if the step touches real-device behavior.
 5. Update both `Session handoff state` and `Step completion log` before ending the session.
+
+## Follow-up scoped work
+
+1. For future work to make runtime layers manifest-defined instead of fixed to `persistent`, `slow`, and `fast`, use `10-manifest-defined-runtime-layers-plan.md` as the starting point.
+2. The manifest-defined layer follow-up now assumes one or more persistent layers are valid and that the most recently activated persistent layer should become the active base layer.
+3. Step 19 is now the next implementation target because custom manifest layer names still need a generic helper contract; the current fixed helper surface only compiles the built-in persistent/slow/fast runtime behaviors.

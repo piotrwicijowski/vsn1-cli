@@ -4,7 +4,9 @@ use std::fmt;
 use std::path::Path;
 
 use crate::runtime::installed_runtime_dir;
-use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleError, RuntimeFieldSpec};
+use crate::runtime_bundle::{
+    RuntimeBundle, RuntimeBundleError, RuntimeFieldSpec, RuntimeLayerActivation,
+};
 
 const TEXT_LIST_ITEM_COUNT: usize = 8;
 const DEFAULT_INFO_LABEL: &str = "---";
@@ -20,6 +22,10 @@ pub enum ScreenError {
     },
     InvalidAssignmentSyntax {
         input: String,
+    },
+    UnknownLayer {
+        name: String,
+        supported: Vec<String>,
     },
     UnknownField {
         name: String,
@@ -44,11 +50,14 @@ pub enum ScreenError {
     },
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ScreenLayer {
-    Persistent,
-    Slow,
-    Fast,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScreenLayer(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenLayerSpec {
+    name: ScreenLayer,
+    activation: RuntimeLayerActivation,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -84,6 +93,8 @@ pub struct ScreenAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenFieldRegistry {
+    layers: Vec<ScreenLayerSpec>,
+    layers_by_name: HashMap<String, usize>,
     fields: Vec<ScreenFieldSpec>,
     fields_by_name: HashMap<String, usize>,
 }
@@ -101,6 +112,11 @@ impl fmt::Display for ScreenError {
                     "screen assignment `{input}` must use FIELD=VALUE syntax; run `vsn1-cli screen set --help` for examples"
                 )
             }
+            Self::UnknownLayer { name, supported } => write!(
+                f,
+                "unknown screen layer `{name}` (supported layers: {}); run `vsn1-cli screen --help` for examples",
+                supported.join(", ")
+            ),
             Self::UnknownField { name, supported } => write!(
                 f,
                 "unknown screen field `{name}` (supported fields: {}); run `vsn1-cli screen set --help` for examples",
@@ -135,7 +151,7 @@ impl fmt::Display for ScreenError {
             ),
             Self::UnsupportedActivationLayer { layer } => write!(
                 f,
-                "screen activation is only supported for the `slow` and `fast` layers, got `{}`",
+                "the current fixed runtime helper contract does not yet support activating manifest layer `{}`",
                 layer.as_str()
             ),
         }
@@ -148,6 +164,7 @@ impl StdError for ScreenError {
             Self::Bundle(error) => Some(error),
             Self::InvalidRuntimeFieldSpec { .. }
             | Self::InvalidAssignmentSyntax { .. }
+            | Self::UnknownLayer { .. }
             | Self::UnknownField { .. }
             | Self::InvalidValue { .. }
             | Self::DuplicateFieldAssignment { .. }
@@ -165,24 +182,26 @@ impl From<RuntimeBundleError> for ScreenError {
 }
 
 impl ScreenLayer {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Persistent => "persistent",
-            Self::Slow => "slow",
-            Self::Fast => "fast",
-        }
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
     }
 
-    fn parse(raw: &str, field_name: &str) -> Result<Self> {
-        match raw {
-            "persistent" => Ok(Self::Persistent),
-            "slow" => Ok(Self::Slow),
-            "fast" => Ok(Self::Fast),
-            _ => Err(ScreenError::InvalidRuntimeFieldSpec {
-                field: field_name.to_string(),
-                message: format!("unsupported layer `{raw}`"),
-            }),
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ScreenLayerSpec {
+    pub fn name(&self) -> &ScreenLayer {
+        &self.name
+    }
+
+    pub fn activation(&self) -> RuntimeLayerActivation {
+        self.activation
+    }
+
+    pub fn timeout_ms(&self) -> Option<u64> {
+        self.timeout_ms
     }
 }
 
@@ -226,8 +245,8 @@ impl ScreenFieldSpec {
         &self.public_name
     }
 
-    pub fn layer(&self) -> ScreenLayer {
-        self.layer
+    pub fn layer(&self) -> &ScreenLayer {
+        &self.layer
     }
 
     pub fn value_kind(&self) -> ScreenValueKind {
@@ -273,6 +292,31 @@ impl ScreenFieldRegistry {
     }
 
     pub fn from_bundle(bundle: &RuntimeBundle) -> Result<Self> {
+        let mut layers = Vec::with_capacity(bundle.manifest().layers.len());
+        let mut layers_by_name = HashMap::with_capacity(bundle.manifest().layers.len());
+
+        for runtime_layer in &bundle.manifest().layers {
+            let layer = ScreenLayer::new(runtime_layer.name.clone());
+            let layer_name = layer.as_str().to_string();
+            let layer_index = layers.len();
+
+            if layers_by_name
+                .insert(layer_name.clone(), layer_index)
+                .is_some()
+            {
+                return Err(ScreenError::InvalidRuntimeFieldSpec {
+                    field: layer_name,
+                    message: "duplicate layer name after host registry conversion".to_string(),
+                });
+            }
+
+            layers.push(ScreenLayerSpec {
+                name: layer,
+                activation: runtime_layer.activation,
+                timeout_ms: runtime_layer.timeout_ms,
+            });
+        }
+
         let mut fields = Vec::with_capacity(bundle.manifest().fields.len());
         let mut fields_by_name = HashMap::with_capacity(bundle.manifest().fields.len());
 
@@ -296,9 +340,29 @@ impl ScreenFieldRegistry {
         }
 
         Ok(Self {
+            layers,
+            layers_by_name,
             fields,
             fields_by_name,
         })
+    }
+
+    pub fn layers(&self) -> &[ScreenLayerSpec] {
+        &self.layers
+    }
+
+    pub fn layer(&self, name: &str) -> Result<&ScreenLayerSpec> {
+        self.layers_by_name
+            .get(name)
+            .map(|index| &self.layers[*index])
+            .ok_or_else(|| ScreenError::UnknownLayer {
+                name: name.to_string(),
+                supported: self
+                    .layers
+                    .iter()
+                    .map(|layer| layer.name.as_str().to_string())
+                    .collect(),
+            })
     }
 
     pub fn fields(&self) -> &[ScreenFieldSpec] {
@@ -319,10 +383,10 @@ impl ScreenFieldRegistry {
             })
     }
 
-    pub fn fields_for_layer(&self, layer: ScreenLayer) -> Vec<&ScreenFieldSpec> {
+    pub fn fields_for_layer(&self, layer: &ScreenLayer) -> Vec<&ScreenFieldSpec> {
         self.fields
             .iter()
-            .filter(|field| field.layer == layer)
+            .filter(|field| &field.layer == layer)
             .collect()
     }
 
@@ -359,10 +423,10 @@ impl ScreenFieldRegistry {
             .collect()
     }
 
-    pub fn clear_plan(&self, layer: ScreenLayer) -> Vec<ScreenAssignment> {
+    pub fn clear_plan(&self, layer: &ScreenLayer) -> Vec<ScreenAssignment> {
         self.fields
             .iter()
-            .filter(|field| field.layer == layer)
+            .filter(|field| &field.layer == layer)
             .cloned()
             .map(|field| ScreenAssignment {
                 value: field.clear_value.clone(),
@@ -374,7 +438,7 @@ impl ScreenFieldRegistry {
 
 pub fn compile_set_lua(
     assignments: &[ScreenAssignment],
-    activate: Option<ScreenLayer>,
+    activate: Option<&ScreenLayer>,
 ) -> Result<String> {
     validate_assignments(assignments, activate)?;
 
@@ -382,7 +446,7 @@ pub fn compile_set_lua(
 
     let persistent = assignments
         .iter()
-        .filter(|assignment| assignment.field.layer == ScreenLayer::Persistent)
+        .filter(|assignment| assignment.field.layer.as_str() == "persistent")
         .cloned()
         .collect::<Vec<_>>();
     if !persistent.is_empty() {
@@ -391,39 +455,37 @@ pub fn compile_set_lua(
 
     for assignment in assignments
         .iter()
-        .filter(|assignment| assignment.field.layer == ScreenLayer::Slow)
-    {
-        statements.push(compile_overlay_update(assignment)?);
-    }
-
-    for assignment in assignments
-        .iter()
-        .filter(|assignment| assignment.field.layer == ScreenLayer::Fast)
+        .filter(|assignment| assignment.field.layer.as_str() != "persistent")
     {
         statements.push(compile_overlay_update(assignment)?);
     }
 
     if let Some(layer) = activate {
-        statements.push(compile_activate_lua(layer)?);
+        if let Some(statement) = compile_activate_lua(layer)? {
+            statements.push(statement);
+        }
     }
 
     Ok(statements.join(";"))
 }
 
-pub fn compile_clear_lua(registry: &ScreenFieldRegistry, layer: ScreenLayer) -> Result<String> {
+pub fn compile_clear_lua(registry: &ScreenFieldRegistry, layer: &ScreenLayer) -> Result<String> {
     compile_set_lua(&registry.clear_plan(layer), None)
 }
 
-pub fn compile_activate_lua(layer: ScreenLayer) -> Result<String> {
-    match layer {
-        ScreenLayer::Slow => Ok("A(5)".to_string()),
-        ScreenLayer::Fast => Ok("A(1)".to_string()),
-        ScreenLayer::Persistent => Err(ScreenError::UnsupportedActivationLayer { layer }),
+pub fn compile_activate_lua(layer: &ScreenLayer) -> Result<Option<String>> {
+    match layer.as_str() {
+        "slow" => Ok(Some("A(5)".to_string())),
+        "fast" => Ok(Some("A(1)".to_string())),
+        "persistent" => Ok(None),
+        _ => Err(ScreenError::UnsupportedActivationLayer {
+            layer: layer.clone(),
+        }),
     }
 }
 
 fn build_field_spec(runtime_field: &RuntimeFieldSpec) -> Result<ScreenFieldSpec> {
-    let layer = ScreenLayer::parse(&runtime_field.layer, &runtime_field.name)?;
+    let layer = ScreenLayer::new(runtime_field.layer.clone());
     let value_kind = ScreenValueKind::parse(&runtime_field.value_kind, &runtime_field.name)?;
 
     let (public_layer, _) =
@@ -545,7 +607,7 @@ fn parse_bool(raw_value: &str) -> Option<bool> {
 
 fn validate_assignments(
     assignments: &[ScreenAssignment],
-    activate: Option<ScreenLayer>,
+    activate: Option<&ScreenLayer>,
 ) -> Result<()> {
     let mut seen = HashSet::with_capacity(assignments.len());
     for assignment in assignments {
@@ -557,16 +619,12 @@ fn validate_assignments(
     }
 
     if let Some(activate) = activate {
-        if activate == ScreenLayer::Persistent {
-            return Err(ScreenError::UnsupportedActivationLayer { layer: activate });
-        }
-
         for assignment in assignments {
-            if assignment.field.layer != activate {
+            if &assignment.field.layer != activate {
                 return Err(ScreenError::InvalidActivationMix {
-                    activate,
+                    activate: activate.clone(),
                     field: assignment.field.public_name.clone(),
-                    field_layer: assignment.field.layer,
+                    field_layer: assignment.field.layer.clone(),
                 });
             }
         }
@@ -628,21 +686,21 @@ fn compile_persistent_update(assignments: &[ScreenAssignment]) -> Result<String>
 
 fn compile_overlay_update(assignment: &ScreenAssignment) -> Result<String> {
     match (
-        assignment.field.layer,
+        assignment.field.layer.as_str(),
         assignment.field.runtime_key.as_str(),
         &assignment.value,
     ) {
-        (ScreenLayer::Slow, "m", ScreenValue::Text(_)) => {
+        ("slow", "m", ScreenValue::Text(_)) => {
             Ok(format!("S({})", compile_lua_value(&assignment.value)))
         }
-        (ScreenLayer::Fast, "a", ScreenValue::Text(_)) => {
+        ("fast", "a", ScreenValue::Text(_)) => {
             Ok(format!("F({})", compile_lua_value(&assignment.value)))
         }
         (layer, runtime_key, _) => Err(ScreenError::InvalidRuntimeFieldSpec {
             field: assignment.field.public_name.clone(),
             message: format!(
                 "unsupported {}-layer runtime mapping `{runtime_key}` for host Lua compilation",
-                layer.as_str()
+                layer
             ),
         }),
     }
@@ -698,7 +756,7 @@ mod tests {
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
         let title = registry.field("persistent.title").unwrap();
-        assert_eq!(title.layer(), ScreenLayer::Persistent);
+        assert_eq!(title.layer(), &ScreenLayer::new("persistent"));
         assert_eq!(title.value_kind(), ScreenValueKind::Text);
         assert_eq!(title.runtime_key(), "t");
         assert_eq!(title.clear_value(), &ScreenValue::Text(String::new()));
@@ -838,9 +896,9 @@ notes = "fixture"
     fn clear_plan_uses_layer_specific_fields_and_runtime_defaults() {
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let persistent = registry.clear_plan(ScreenLayer::Persistent);
-        let slow = registry.clear_plan(ScreenLayer::Slow);
-        let fast = registry.clear_plan(ScreenLayer::Fast);
+        let persistent = registry.clear_plan(&ScreenLayer::new("persistent"));
+        let slow = registry.clear_plan(&ScreenLayer::new("slow"));
+        let fast = registry.clear_plan(&ScreenLayer::new("fast"));
 
         assert_eq!(persistent.len(), 11);
         assert_eq!(slow.len(), 1);
@@ -917,7 +975,8 @@ notes = "fixture"
             .parse_assignments(["persistent.title=Hello", "slow.message=Disk almost full"])
             .unwrap();
 
-        let error = compile_set_lua(&assignments, Some(ScreenLayer::Slow)).unwrap_err();
+        let activate = ScreenLayer::new("slow");
+        let error = compile_set_lua(&assignments, Some(&activate)).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -929,8 +988,8 @@ notes = "fixture"
     fn compiles_layer_clear_using_runtime_defaults() {
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let slow_lua = compile_clear_lua(&registry, ScreenLayer::Slow).unwrap();
-        let persistent_lua = compile_clear_lua(&registry, ScreenLayer::Persistent).unwrap();
+        let slow_lua = compile_clear_lua(&registry, &ScreenLayer::new("slow")).unwrap();
+        let persistent_lua = compile_clear_lua(&registry, &ScreenLayer::new("persistent")).unwrap();
 
         assert_eq!(slow_lua, "S('')");
         assert_eq!(
@@ -940,14 +999,55 @@ notes = "fixture"
     }
 
     #[test]
-    fn compiles_temporary_layer_activation_helpers() {
-        assert_eq!(compile_activate_lua(ScreenLayer::Slow).unwrap(), "A(5)");
-        assert_eq!(compile_activate_lua(ScreenLayer::Fast).unwrap(), "A(1)");
+    fn compiles_current_fixed_runtime_activation_helpers() {
+        assert_eq!(
+            compile_activate_lua(&ScreenLayer::new("slow")).unwrap(),
+            Some("A(5)".to_string())
+        );
+        assert_eq!(
+            compile_activate_lua(&ScreenLayer::new("fast")).unwrap(),
+            Some("A(1)".to_string())
+        );
+        assert_eq!(
+            compile_activate_lua(&ScreenLayer::new("persistent")).unwrap(),
+            None
+        );
 
-        let error = compile_activate_lua(ScreenLayer::Persistent).unwrap_err();
+        let error = compile_activate_lua(&ScreenLayer::new("alt")).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "screen activation is only supported for the `slow` and `fast` layers, got `persistent`"
+            "the current fixed runtime helper contract does not yet support activating manifest layer `alt`"
+        );
+    }
+
+    #[test]
+    fn registry_exposes_runtime_layer_inventory() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+
+        assert_eq!(
+            registry
+                .layers()
+                .iter()
+                .map(|layer| layer.name().as_str())
+                .collect::<Vec<_>>(),
+            vec!["persistent", "slow", "fast"]
+        );
+        assert_eq!(
+            registry.layer("slow").unwrap().activation(),
+            RuntimeLayerActivation::Temporary
+        );
+        assert_eq!(registry.layer("slow").unwrap().timeout_ms(), Some(5000));
+    }
+
+    #[test]
+    fn rejects_unknown_screen_layers() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+
+        let error = registry.layer("notice").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "unknown screen layer `notice` (supported layers: persistent, slow, fast); run `vsn1-cli screen --help` for examples"
         );
     }
 
@@ -1025,6 +1125,23 @@ notes = "fixture"
 bundle_version = "test"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+timeout_ms = 5000
+
+[[layers]]
+name = "fast"
+priority = 20
+activation = "temporary"
+timeout_ms = 1000
 
 [[owned_slots]]
 name = "lcd-init"

@@ -8,6 +8,8 @@ That is no longer the intended direction.
 
 Use `09-runtime-discovery-and-lifecycle-redesign.md` as the controlling runtime plan for all new runtime work. When this file and `09` disagree, follow `09`.
 
+For the follow-up scope that makes runtime layers manifest-defined instead of fixed to `persistent`, `slow`, and `fast`, use `10-manifest-defined-runtime-layers-plan.md`, which now assumes one or more persistent layers are valid and that the last activated persistent layer becomes the active base layer.
+
 ## Decision summary
 
 The current planned shape for `vsn1-cli` v1 is:

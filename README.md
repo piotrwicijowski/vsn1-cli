@@ -10,6 +10,7 @@ This project is intentionally screen-first and one-shot only. The CLI provisions
 - macOS support is a target, but host-side validation is still in progress.
 - Curated public commands are grouped under `device`, `runtime`, and `screen`.
 - Curated screen mutations load their field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
+- The current shipped runtime model is still the fixed `persistent` / `slow` / `fast` layout. The planned manifest-defined layer follow-up will allow one or more persistent layers, where the most recently activated persistent layer becomes the active base layer; that behavior is not implemented end-to-end yet.
 
 ## Install And Build
 

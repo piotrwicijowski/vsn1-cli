@@ -8,6 +8,26 @@ compatibility_notes = [
   "This revision keeps the restored temporary-layer activation logic and changes the slow overlay visual from a white-filled panel to a dark filled panel with a white border so the text remains legible."
 ]
 
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+notes = "Primary long-lived content layer."
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+timeout_ms = 5000
+notes = "Medium-priority notification layer."
+
+[[layers]]
+name = "fast"
+priority = 20
+activation = "temporary"
+timeout_ms = 1000
+notes = "High-priority transient reaction layer."
+
 [[owned_slots]]
 name = "lcd-init"
 page = 0

@@ -11,7 +11,7 @@ pub mod transport;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::device::{
     discover_supported_devices, select_single_device, DeviceDiscovery, SystemDeviceDiscovery,
@@ -26,7 +26,6 @@ use crate::runtime::{
 use crate::runtime_bundle::{discover_runtimes, resolve_runtime, DiscoveredRuntime};
 use crate::screen::{
     compile_activate_lua, compile_clear_lua, compile_set_lua, ScreenFieldRegistry,
-    ScreenLayer as RegistryScreenLayer,
 };
 use crate::targeting::{resolve_target, ResolvedTarget};
 use crate::transport::{SerialTransportFactory, SystemTransportFactory};
@@ -45,12 +44,12 @@ const RUNTIME_REPAIR_AFTER_HELP: &str =
 const RUNTIME_REMOVE_AFTER_HELP: &str =
     "Restores the pre-install backup when available, otherwise clears the frozen runtime's owned slots with a warning, then removes ~/.config/vsn1-cli/runtime.";
 const RUNTIME_STATUS_AFTER_HELP: &str = "Shows the owned-slot inspection result relative to the frozen installed runtime copy when one is present locally.";
-const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set fast.action=Tap --activate fast --dx 0 --dy 0\n\nCurated screen fields are loaded from the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
+const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set fast.action=Tap --activate fast --dx 0 --dy 0\n\nCurated screen fields and layer names are loaded from the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
 const SCREEN_CLEAR_AFTER_HELP: &str =
-    "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0";
+    "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0\n\nLayer names are validated against the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
 const SCREEN_RAW_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen raw \"return update_param('t', 'Hello')\"\n  vsn1-cli screen raw \"lcd:ldrr(0,0,128,64); lcd:ldsw()\" --dx 0 --dy 0\n\n`screen raw` bypasses the curated field registry and runtime-shape validation.";
 const SCREEN_ACTIVATE_AFTER_HELP: &str =
-    "Examples:\n  vsn1-cli screen activate slow\n  vsn1-cli screen activate fast --dx 0 --dy 0\n\n`screen activate` requires the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
+    "Examples:\n  vsn1-cli screen activate persistent\n  vsn1-cli screen activate slow\n  vsn1-cli screen activate fast --dx 0 --dy 0\n\n`screen activate` validates layer names against the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
 
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(
@@ -191,10 +190,10 @@ pub enum ScreenCommand {
         assignments: Vec<String>,
         #[arg(
             long,
-            value_enum,
-            help = "Activate a temporary overlay layer after updating it"
+            value_name = "LAYER",
+            help = "Activate a manifest-defined layer after updating it"
         )]
-        activate: Option<ActivationLayer>,
+        activate: Option<String>,
         #[command(flatten)]
         target: TargetArgs,
     },
@@ -203,8 +202,8 @@ pub enum ScreenCommand {
         after_help = SCREEN_CLEAR_AFTER_HELP
     )]
     Clear {
-        #[arg(value_enum, help = "Layer to clear")]
-        layer: Layer,
+        #[arg(value_name = "LAYER", help = "Manifest-defined layer to clear")]
+        layer: String,
         #[command(flatten)]
         target: TargetArgs,
     },
@@ -222,12 +221,12 @@ pub enum ScreenCommand {
         target: TargetArgs,
     },
     #[command(
-        about = "Activate the slow or fast overlay layer",
+        about = "Activate a manifest-defined layer",
         after_help = SCREEN_ACTIVATE_AFTER_HELP
     )]
     Activate {
-        #[arg(value_enum, help = "Temporary layer to activate")]
-        layer: ActivationLayer,
+        #[arg(value_name = "LAYER", help = "Manifest-defined layer to activate")]
+        layer: String,
         #[command(flatten)]
         target: TargetArgs,
     },
@@ -247,19 +246,6 @@ pub struct TargetArgs {
         help_heading = "Targeting"
     )]
     pub dy: Option<u16>,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum)]
-pub enum Layer {
-    Persistent,
-    Slow,
-    Fast,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, ValueEnum)]
-pub enum ActivationLayer {
-    Slow,
-    Fast,
 }
 
 pub fn command() -> clap::Command {
@@ -348,13 +334,13 @@ where
                 activate,
             ),
             ScreenCommand::Clear { layer, target } => {
-                execute_screen_clear(discovery, transport_factory, &target, layer)
+                execute_screen_clear(discovery, transport_factory, &target, &layer)
             }
             ScreenCommand::Raw { lua, target } => {
                 execute_screen_raw(discovery, transport_factory, &target, &lua)
             }
             ScreenCommand::Activate { layer, target } => {
-                execute_screen_activate(discovery, transport_factory, &target, layer)
+                execute_screen_activate(discovery, transport_factory, &target, &layer)
             }
         },
     }
@@ -451,7 +437,7 @@ fn execute_screen_set<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     assignments: &[String],
-    activate: Option<ActivationLayer>,
+    activate: Option<String>,
 ) -> Result<String>
 where
     D: DeviceDiscovery,
@@ -473,7 +459,7 @@ fn execute_screen_set_with_registry<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     assignments: &[String],
-    activate: Option<ActivationLayer>,
+    activate: Option<String>,
     registry: &ScreenFieldRegistry,
 ) -> Result<String>
 where
@@ -481,10 +467,11 @@ where
     F: SerialTransportFactory,
 {
     let parsed_assignments = registry.parse_assignments(assignments)?;
-    let lua = compile_set_lua(
-        &parsed_assignments,
-        activate.map(screen_layer_from_activation_layer),
-    )?;
+    let activate_layer = activate
+        .as_deref()
+        .map(|layer| registry.layer(layer).map(|layer| layer.name().clone()))
+        .transpose()?;
+    let lua = compile_set_lua(&parsed_assignments, activate_layer.as_ref())?;
 
     execute_curated_screen_lua(
         discovery,
@@ -499,7 +486,7 @@ fn execute_screen_clear<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-    layer: Layer,
+    layer: &str,
 ) -> Result<String>
 where
     D: DeviceDiscovery,
@@ -513,14 +500,15 @@ fn execute_screen_clear_with_registry<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-    layer: Layer,
+    layer: &str,
     registry: &ScreenFieldRegistry,
 ) -> Result<String>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
 {
-    let lua = compile_clear_lua(&registry, screen_layer_from_layer(layer))?;
+    let layer = registry.layer(layer)?.name().clone();
+    let lua = compile_clear_lua(registry, &layer)?;
 
     execute_curated_screen_lua(
         discovery,
@@ -535,14 +523,47 @@ fn execute_screen_activate<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-    layer: ActivationLayer,
+    layer: &str,
 ) -> Result<String>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
 {
-    let _registry = ScreenFieldRegistry::installed()?;
-    let lua = compile_activate_lua(screen_layer_from_activation_layer(layer))?;
+    let registry = ScreenFieldRegistry::installed()?;
+    execute_screen_activate_with_registry(
+        discovery,
+        transport_factory,
+        target_args,
+        layer,
+        &registry,
+    )
+}
+
+fn execute_screen_activate_with_registry<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+    layer: &str,
+    registry: &ScreenFieldRegistry,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let layer = registry.layer(layer)?.name().clone();
+    let lua = compile_activate_lua(&layer)?;
+
+    let Some(lua) = lua else {
+        return execute_curated_screen_noop(
+            discovery,
+            transport_factory,
+            target_args,
+            &format!(
+                "No immediate activation helper send was required for layer `{}` under the current fixed runtime contract.",
+                layer.as_str()
+            ),
+        );
+    };
 
     execute_curated_screen_lua(
         discovery,
@@ -551,6 +572,27 @@ where
         &lua,
         "screen activation command",
     )
+}
+
+fn execute_curated_screen_noop<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+    note: &str,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let devices = discover_supported_devices(discovery)?;
+    let device = select_single_device(&devices)?;
+    let _transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+
+    Ok(format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\n{note}\n",
+        protocol::GRID_BAUD_RATE,
+    ))
 }
 
 fn execute_curated_screen_lua<D, F>(
@@ -792,21 +834,6 @@ fn render_runtime_status_without_local_copy_output(
         "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nInstalled runtime: none\nStatus: no frozen installed runtime was found under ~/.config/vsn1-cli/runtime\n",
         protocol::GRID_BAUD_RATE,
     )
-}
-
-fn screen_layer_from_layer(layer: Layer) -> RegistryScreenLayer {
-    match layer {
-        Layer::Persistent => RegistryScreenLayer::Persistent,
-        Layer::Slow => RegistryScreenLayer::Slow,
-        Layer::Fast => RegistryScreenLayer::Fast,
-    }
-}
-
-fn screen_layer_from_activation_layer(layer: ActivationLayer) -> RegistryScreenLayer {
-    match layer {
-        ActivationLayer::Slow => RegistryScreenLayer::Slow,
-        ActivationLayer::Fast => RegistryScreenLayer::Fast,
-    }
 }
 
 fn render_runtime_install_output(
@@ -1145,7 +1172,7 @@ mod tests {
         let set_help = set_command.render_help().to_string();
 
         assert!(set_help.contains("One or more curated screen field assignments"));
-        assert!(set_help.contains("Activate a temporary overlay layer after updating it"));
+        assert!(set_help.contains("Activate a manifest-defined layer after updating it"));
         assert!(set_help.contains("frozen installed runtime copy under ~/.config/vsn1-cli/runtime"));
     }
 
@@ -1278,7 +1305,7 @@ mod tests {
                             "persistent.title=Hello".to_string(),
                             "slow.message=World".to_string(),
                         ],
-                        activate: Some(ActivationLayer::Slow),
+                        activate: Some("slow".to_string()),
                         target: TargetArgs {
                             dx: Some(1),
                             dy: Some(2),
@@ -1298,7 +1325,24 @@ mod tests {
             Cli {
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Clear {
-                        layer: Layer::Fast,
+                        layer: "fast".to_string(),
+                        target: TargetArgs::default(),
+                    },
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_screen_activate_layer() {
+        let cli = try_parse_from(["vsn1-cli", "screen", "activate", "persistent"]).unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: TopLevelCommand::Screen(ScreenArgs {
+                    command: ScreenCommand::Activate {
+                        layer: "persistent".to_string(),
                         target: TargetArgs::default(),
                     },
                 }),
@@ -1579,7 +1623,7 @@ mod tests {
                 "persistent.title=Hello".to_string(),
                 "slow.message=World".to_string(),
             ],
-            Some(ActivationLayer::Slow),
+            Some("slow".to_string()),
             &registry,
         )
         .unwrap_err();
@@ -1588,6 +1632,49 @@ mod tests {
             error.to_string(),
             "screen set --activate slow only supports slow-layer assignments, but `persistent.title` belongs to the persistent layer"
         );
+    }
+
+    #[test]
+    fn screen_activate_validates_layer_names_against_the_registry() {
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+        let error = execute_screen_activate_with_registry(
+            &StaticDiscovery {
+                devices: vec![test_device("/dev/ttyACM0")],
+                error: None,
+            },
+            &mut FakeTransportFactory::default(),
+            &TargetArgs::default(),
+            "notice",
+            &registry,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "unknown screen layer `notice` (supported layers: persistent, slow, fast); run `vsn1-cli screen --help` for examples"
+        );
+    }
+
+    #[test]
+    fn screen_activate_persistent_is_a_runtime_validated_noop_for_the_current_fixed_contract() {
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut transport_factory = FakeTransportFactory::default();
+        let registry = ScreenFieldRegistry::bundled().unwrap();
+
+        let output = execute_screen_activate_with_registry(
+            &discovery,
+            &mut transport_factory,
+            &TargetArgs::default(),
+            "persistent",
+            &registry,
+        )
+        .unwrap();
+
+        assert!(output.contains("No immediate activation helper send was required for layer `persistent` under the current fixed runtime contract."));
+        assert_eq!(transport_factory.open_calls().len(), 1);
     }
 
     #[test]

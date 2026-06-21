@@ -13,7 +13,7 @@ use crate::protocol::{
 };
 use crate::runtime_bundle::{
     normalize_text_content, normalized_sha256, OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle,
-    RuntimeBundleError,
+    RuntimeBundleError, RuntimeLayerSpec,
 };
 use crate::targeting::ResolvedTarget;
 use crate::transport::{SerialTransport, TransportError};
@@ -122,6 +122,7 @@ struct StoredRuntimeManifest {
     runtime_marker: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     compatibility_notes: Vec<String>,
+    layers: Vec<RuntimeLayerSpec>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     owned_slots: Vec<StoredOwnedRuntimeSlot>,
 }
@@ -911,6 +912,7 @@ where
             "captured from requested target {} before runtime install",
             requested_target
         )],
+        layers: bundle.manifest().layers.clone(),
         owned_slots: bundle
             .assets()
             .iter()
@@ -1594,6 +1596,11 @@ bundle_version = "{bundle_version}"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
 
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
 [[owned_slots]]
 name = "lcd-init"
 page = 0
@@ -1766,6 +1773,7 @@ runtime_marker = "fixture:lcd-draw"
 bundle_version = "broken"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
+layers = [{ name = "persistent", priority = 0, activation = "persistent" }]
 owned_slots = []
 "#,
         )
@@ -1802,6 +1810,11 @@ owned_slots = []
 bundle_version = "test-install"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
 
 [[owned_slots]]
 name = "second"

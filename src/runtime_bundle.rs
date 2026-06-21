@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
@@ -60,9 +60,28 @@ pub struct RuntimeBundleManifest {
     pub runtime_marker: String,
     #[serde(default)]
     pub compatibility_notes: Vec<String>,
+    pub layers: Vec<RuntimeLayerSpec>,
     pub owned_slots: Vec<OwnedRuntimeSlot>,
     #[serde(default)]
     pub fields: Vec<RuntimeFieldSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeLayerSpec {
+    pub name: String,
+    pub priority: u32,
+    pub activation: RuntimeLayerActivation,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeLayerActivation {
+    Persistent,
+    Temporary,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -375,6 +394,8 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
         });
     }
 
+    validate_layers(manifest)?;
+
     if manifest.owned_slots.is_empty() {
         return Err(RuntimeBundleError::InvalidManifest {
             message: "owned_slots must not be empty".to_string(),
@@ -397,6 +418,11 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
         }
     }
 
+    let declared_layers = manifest
+        .layers
+        .iter()
+        .map(|layer| layer.name.as_str())
+        .collect::<HashSet<_>>();
     let mut field_names = HashSet::new();
     for field in &manifest.fields {
         if !field_names.insert(field.name.clone()) {
@@ -404,9 +430,73 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
                 message: format!("duplicate field inventory entry {}", field.name),
             });
         }
+
+        if !declared_layers.contains(field.layer.as_str()) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!(
+                    "field {} references undeclared layer {}",
+                    field.name, field.layer
+                ),
+            });
+        }
     }
 
     Ok(())
+}
+
+fn validate_layers(manifest: &RuntimeBundleManifest) -> Result<()> {
+    let mut layer_names = HashSet::new();
+    let mut priorities = HashSet::new();
+    let mut persistent_layer_count = 0usize;
+
+    for layer in &manifest.layers {
+        if layer.name.trim().is_empty() {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: "layer name must not be empty".to_string(),
+            });
+        }
+
+        if !layer_names.insert(layer.name.clone()) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!("duplicate layer name {}", layer.name),
+            });
+        }
+
+        if !priorities.insert(layer.priority) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!("duplicate layer priority {}", layer.priority),
+            });
+        }
+
+        match layer.activation {
+            RuntimeLayerActivation::Persistent => {
+                persistent_layer_count += 1;
+                if layer.timeout_ms.is_some() {
+                    return Err(RuntimeBundleError::InvalidManifest {
+                        message: format!(
+                            "persistent layer {} must not define timeout_ms",
+                            layer.name
+                        ),
+                    });
+                }
+            }
+            RuntimeLayerActivation::Temporary => {
+                if layer.timeout_ms.is_none() {
+                    return Err(RuntimeBundleError::InvalidManifest {
+                        message: format!("temporary layer {} must define timeout_ms", layer.name),
+                    });
+                }
+            }
+        }
+    }
+
+    if persistent_layer_count == 0 {
+        Err(RuntimeBundleError::InvalidManifest {
+            message: "at least one persistent layer must be declared".to_string(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsset> {
@@ -492,6 +582,11 @@ mod tests {
 bundle_version = "{bundle_version}"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
 
 [[owned_slots]]
 name = "lcd-init"
@@ -645,6 +740,11 @@ bundle_version = "test"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
 
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
 [[owned_slots]]
 name = "lcd-init"
 page = 0
@@ -675,6 +775,11 @@ runtime_marker = "fixture:lcd-init"
 bundle_version = "test"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
 
 [[owned_slots]]
 name = "lcd-init"
@@ -712,6 +817,293 @@ notes = "fixture"
     }
 
     #[test]
+    fn rejects_duplicate_layer_names() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "persistent"
+priority = 10
+activation = "temporary"
+timeout_ms = 1000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: duplicate layer name persistent"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_layer_priorities() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "slow"
+priority = 0
+activation = "temporary"
+timeout_ms = 5000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: duplicate layer priority 0"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_persistent_layer() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+timeout_ms = 5000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: at least one persistent layer must be declared"
+        );
+    }
+
+    #[test]
+    fn allows_multiple_persistent_layers() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "base"
+priority = 1
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let bundle = RuntimeBundle::load_from_dir(root).unwrap();
+
+        assert_eq!(bundle.manifest().layers.len(), 2);
+    }
+
+    #[test]
+    fn rejects_temporary_layers_without_timeout() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: temporary layer slow must define timeout_ms"
+        );
+    }
+
+    #[test]
+    fn rejects_persistent_layers_with_timeout() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+timeout_ms = 1000
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: persistent layer persistent must not define timeout_ms"
+        );
+    }
+
+    #[test]
+    fn rejects_fields_that_reference_undeclared_layers() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+bundle_version = "test"
+compatibility_reference = "fixture"
+runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+runtime_marker = "fixture:lcd-init"
+
+[[fields]]
+name = "slow.message"
+layer = "slow"
+value_kind = "text"
+runtime_key = "m"
+notes = "fixture"
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: field slow.message references undeclared layer slow"
+        );
+    }
+
+    #[test]
     fn rejects_owned_slot_scripts_that_exceed_the_grid_config_limit() {
         let fixture = tempdir().unwrap();
         let root = fixture.path();
@@ -724,6 +1116,11 @@ notes = "fixture"
 bundle_version = "test"
 compatibility_reference = "fixture"
 runtime_marker = "fixture"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
 
 [[owned_slots]]
 name = "lcd-init"
