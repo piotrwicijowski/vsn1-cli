@@ -20,12 +20,12 @@ Use this checklist for the optional daemon-backed execution follow-up after the 
 ## Session handoff state
 
 - Overall status: `in_progress`
-- Last completed step: `step 6`
+- Last completed step: `step 7`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 6 added a reusable per-device daemon session registry with worker threads, lazy open, `5s`-compatible configurable idle close behavior, same-device request serialization, different-device independence, and regression coverage for transport reuse, idle close plus reopen, same-device serialization, and cross-device concurrency)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 7 added a real screen-capable daemon request handler backed by the per-device session registry, switched daemon_main() to start that handler, and added integration-style daemon-backed screen raw routing and output-parity coverage without local fallback)`
 - Last hardware validation: `none for this checklist`
 - Open blockers: `none`
-- Next session start point: `step 7`
+- Next session start point: `step 8`
 
 ## Rules for every step
 
@@ -151,7 +151,7 @@ Update this section as work lands.
 - Step 4: `completed on 2026-06-22 - added src/daemon_server.rs with Unix listener bind/accept logic, parent-directory creation, non-socket path protection, one-request/one-response serving, ping health handling, placeholder execute-request error responses, and cleanup-on-drop behavior; added src/bin/vsn1-daemon.rs plus Cargo binary registration and a daemon_main() library entrypoint; added regression coverage for ping round trips, placeholder execute responses, and bind rejection for existing non-socket paths`
 - Step 5: `completed on 2026-06-22 - added src/daemon_client.rs with a real Unix-socket SystemDaemonClient, wired run() through execute_and_render_command_with_optional_daemon(...), kept local-only commands on the cold path, treated missing and stale sockets as fallback-to-local conditions, surfaced live daemon execution/protocol failures as errors, extended the top-level error type with daemon-client failures, and added regression coverage for local-only bypass, no-daemon fallback, stale-socket fallback, and live-daemon routing without local fallback`
 - Step 6: `completed on 2026-06-22 - added src/daemon_session.rs with a reusable per-device session registry backed by one worker thread per device path, lazy transport open, idle-timeout transport drop, reopen-on-next-request behavior, and immediate-write support; added regression coverage proving same-device request serialization, different-device independence, transport reuse within the idle window, and reopen after idle close using a blocking test transport factory`
-- Step 7: `pending`
+- Step 7: `completed on 2026-06-22 - added src/daemon_command_handler.rs with a real screen-command daemon handler that resolves devices, compiles screen set/clear/activate Lua, encodes immediate packets, and writes them through the daemon session registry; upgraded daemon_server.rs to support injected request handlers; switched daemon_main() to run the screen-capable handler over SystemDeviceDiscovery and SystemTransportFactory; added daemon-backed socket round-trip coverage for screen raw plus top-level integration coverage proving execute_and_render_command_with_optional_daemon(...) uses live daemon screen output without local fallback and matches cold-path rendering`
 - Step 8: `pending`
 - Step 9: `pending`
 - Step 10: `pending`

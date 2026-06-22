@@ -1,5 +1,6 @@
 pub mod command_model;
 pub mod daemon_client;
+pub mod daemon_command_handler;
 pub mod daemon_protocol;
 pub mod daemon_server;
 pub mod daemon_session;
@@ -409,7 +410,13 @@ pub fn daemon_main() -> ExitCode {
         }
     };
 
-    let server = match daemon_server::DaemonServer::bind(&socket_path) {
+    let server = match daemon_server::DaemonServer::bind_with_handler(
+        &socket_path,
+        daemon_command_handler::ScreenDaemonRequestHandler::new(
+            SystemDeviceDiscovery,
+            SystemTransportFactory,
+        ),
+    ) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("error: {error}");
@@ -1148,6 +1155,7 @@ mod tests {
     use std::thread;
 
     use crate::daemon_client::{DaemonClientError, DaemonCommandClient, SystemDaemonClient};
+    use crate::daemon_command_handler::ScreenDaemonRequestHandler;
     use crate::daemon_server::DaemonServer;
     use crate::device::{DeviceError, DiscoveredDevice};
     use crate::transport::{
@@ -1925,6 +1933,56 @@ mod tests {
             error.to_string(),
             "daemon execution failed: daemon command execution path is not implemented yet"
         );
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_screen_raw_uses_daemon_output_without_local_fallback() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                FakeTransportFactory::default(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let direct_discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&direct_discovery, &mut direct_transport_factory);
+        let expected_output =
+            execute_and_render_command(&mut direct_executor, request.clone()).unwrap();
+
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let daemon_output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(daemon_output, expected_output);
         assert!(executor.calls().is_empty());
     }
 

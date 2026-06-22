@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::FileTypeExt;
@@ -6,17 +7,52 @@ use std::path::{Path, PathBuf};
 
 use crate::daemon_protocol::{decode_request, encode_response, DaemonRequest, DaemonResponse};
 
-const EXECUTE_NOT_IMPLEMENTED_MESSAGE: &str =
+pub const EXECUTE_NOT_IMPLEMENTED_MESSAGE: &str =
     "daemon command execution path is not implemented yet";
 
-#[derive(Debug)]
-pub struct DaemonServer {
-    listener: UnixListener,
-    socket_path: PathBuf,
+pub trait DaemonRequestHandler: Send + Sync + 'static {
+    fn handle(&self, request: DaemonRequest) -> DaemonResponse;
 }
 
-impl DaemonServer {
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PlaceholderDaemonRequestHandler;
+
+pub struct DaemonServer<H = PlaceholderDaemonRequestHandler> {
+    listener: UnixListener,
+    socket_path: PathBuf,
+    handler: H,
+}
+
+impl<H> fmt::Debug for DaemonServer<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DaemonServer")
+            .field("socket_path", &self.socket_path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DaemonRequestHandler for PlaceholderDaemonRequestHandler {
+    fn handle(&self, request: DaemonRequest) -> DaemonResponse {
+        match request {
+            DaemonRequest::Ping => DaemonResponse::Pong,
+            DaemonRequest::Execute(_) => DaemonResponse::Error {
+                message: EXECUTE_NOT_IMPLEMENTED_MESSAGE.to_string(),
+            },
+        }
+    }
+}
+
+impl DaemonServer<PlaceholderDaemonRequestHandler> {
     pub fn bind(socket_path: &Path) -> io::Result<Self> {
+        Self::bind_with_handler(socket_path, PlaceholderDaemonRequestHandler)
+    }
+}
+
+impl<H> DaemonServer<H>
+where
+    H: DaemonRequestHandler,
+{
+    pub fn bind_with_handler(socket_path: &Path, handler: H) -> io::Result<Self> {
         if let Some(parent) = socket_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -41,6 +77,7 @@ impl DaemonServer {
         Ok(Self {
             listener,
             socket_path: socket_path.to_path_buf(),
+            handler,
         })
     }
 
@@ -64,7 +101,7 @@ impl DaemonServer {
         stream.read_to_end(&mut request_bytes)?;
 
         let response = match decode_request(&request_bytes) {
-            Ok(request) => handle_request(request),
+            Ok(request) => self.handler.handle(request),
             Err(error) => DaemonResponse::Error {
                 message: error.to_string(),
             },
@@ -78,18 +115,9 @@ impl DaemonServer {
     }
 }
 
-impl Drop for DaemonServer {
+impl<H> Drop for DaemonServer<H> {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket_path);
-    }
-}
-
-fn handle_request(request: DaemonRequest) -> DaemonResponse {
-    match request {
-        DaemonRequest::Ping => DaemonResponse::Pong,
-        DaemonRequest::Execute(_) => DaemonResponse::Error {
-            message: EXECUTE_NOT_IMPLEMENTED_MESSAGE.to_string(),
-        },
     }
 }
 
