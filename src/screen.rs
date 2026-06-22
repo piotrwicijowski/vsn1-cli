@@ -41,11 +41,6 @@ pub enum ScreenError {
         field: String,
     },
     InstalledRuntimeMissing,
-    InvalidActivationMix {
-        activate: ScreenLayer,
-        field: String,
-        field_layer: ScreenLayer,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -138,17 +133,6 @@ impl fmt::Display for ScreenError {
                 f,
                 "no frozen installed runtime was found under ~/.config/vsn1-cli/runtime; run `vsn1-cli runtime install <name>` first"
             ),
-            Self::InvalidActivationMix {
-                activate,
-                field,
-                field_layer,
-            } => write!(
-                f,
-                "screen set --activate {} only supports {}-layer assignments, but `{field}` belongs to the {} layer",
-                activate.as_str(),
-                activate.as_str(),
-                field_layer.as_str()
-            ),
         }
     }
 }
@@ -163,8 +147,7 @@ impl StdError for ScreenError {
             | Self::UnknownField { .. }
             | Self::InvalidValue { .. }
             | Self::DuplicateFieldAssignment { .. }
-            | Self::InstalledRuntimeMissing
-            | Self::InvalidActivationMix { .. } => None,
+            | Self::InstalledRuntimeMissing => None,
         }
     }
 }
@@ -601,7 +584,7 @@ fn parse_bool(raw_value: &str) -> Option<bool> {
 
 fn validate_assignments(
     assignments: &[ScreenAssignment],
-    activate: Option<&ScreenLayer>,
+    _activate: Option<&ScreenLayer>,
 ) -> Result<()> {
     let mut seen = HashSet::with_capacity(assignments.len());
     for assignment in assignments {
@@ -609,18 +592,6 @@ fn validate_assignments(
             return Err(ScreenError::DuplicateFieldAssignment {
                 field: assignment.field.public_name.clone(),
             });
-        }
-    }
-
-    if let Some(activate) = activate {
-        for assignment in assignments {
-            if &assignment.field.layer != activate {
-                return Err(ScreenError::InvalidActivationMix {
-                    activate: activate.clone(),
-                    field: assignment.field.public_name.clone(),
-                    field_layer: assignment.field.layer.clone(),
-                });
-            }
         }
     }
 
@@ -982,18 +953,17 @@ notes = "fixture"
     }
 
     #[test]
-    fn rejects_mixed_layer_updates_when_activation_is_requested() {
+    fn compiles_mixed_layer_updates_and_activation_in_one_command() {
         let registry = ScreenFieldRegistry::bundled().unwrap();
         let assignments = registry
             .parse_assignments(["persistent.title=Hello", "slow.message=Disk almost full"])
             .unwrap();
 
-        let activate = ScreenLayer::new("slow");
-        let error = compile_set_lua(&assignments, Some(&activate)).unwrap_err();
+        let lua = compile_set_lua(&assignments, Some(&ScreenLayer::new("slow"))).unwrap();
 
         assert_eq!(
-            error.to_string(),
-            "screen set --activate slow only supports slow-layer assignments, but `persistent.title` belongs to the persistent layer"
+            lua,
+            "set_field('persistent','t','Hello');set_field('slow','m','Disk almost full');activate_layer('slow')"
         );
     }
 

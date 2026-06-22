@@ -143,16 +143,16 @@ Set curated fields on the current default runtime's persistent base layer:
 cargo run -- screen set persistent.title=Tempo persistent.value=64
 ```
 
-Set and activate the current default runtime's `slow` temporary layer:
+Set variables for different layers and activate the current default runtime's `slow` temporary layer in one command:
 
 ```bash
-cargo run -- screen set slow.message='Disk almost full' --activate slow
+cargo run -- screen set persistent.title=Tempo slow.message='Disk almost full' --activate slow
 ```
 
-Set and activate the current default runtime's `fast` temporary layer on an explicit target:
+Set variables for different layers and activate the current default runtime's `fast` temporary layer on an explicit target:
 
 ```bash
-cargo run -- screen set fast.action=Tap --activate fast --dx 0 --dy 0
+cargo run -- screen set persistent.title=Tempo fast.action=Tap --activate fast --dx 0 --dy 0
 ```
 
 Clear a specific manifest-declared layer:

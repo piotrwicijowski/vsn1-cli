@@ -44,7 +44,7 @@ const RUNTIME_REPAIR_AFTER_HELP: &str =
 const RUNTIME_REMOVE_AFTER_HELP: &str =
     "Restores the pre-install backup when available, otherwise clears the frozen runtime's owned slots with a warning, then removes ~/.config/vsn1-cli/runtime.";
 const RUNTIME_STATUS_AFTER_HELP: &str = "Shows the owned-slot inspection result relative to the frozen installed runtime copy when one is present locally.";
-const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set fast.action=Tap --activate fast --dx 0 --dy 0\n\nExamples use the shipped `default` runtime. Curated screen fields and layer names are loaded from the frozen installed runtime copy under ~/.config/vsn1-cli/runtime, so other runtimes may declare different names.";
+const SCREEN_SET_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen set persistent.title=Tempo persistent.value=64\n  vsn1-cli screen set persistent.title=Tempo slow.message='Disk almost full' --activate slow\n  vsn1-cli screen set persistent.title=Tempo fast.action=Tap --activate fast --dx 0 --dy 0\n\nExamples use the shipped `default` runtime. Curated screen fields and layer names are loaded from the frozen installed runtime copy under ~/.config/vsn1-cli/runtime, so other runtimes may declare different names.";
 const SCREEN_CLEAR_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli screen clear persistent\n  vsn1-cli screen clear slow --dx 0 --dy 0\n\nExamples use the shipped `default` runtime. Layer names are validated against the frozen installed runtime copy under ~/.config/vsn1-cli/runtime.";
 const SCREEN_RAW_AFTER_HELP: &str = "Examples:\n  vsn1-cli screen raw \"set_field('persistent','t','Hello')\"\n  vsn1-cli screen raw \"lcd:ldrr(0,0,128,64); lcd:ldsw()\" --dx 0 --dy 0\n\n`screen raw` bypasses the curated field registry and runtime-shape validation and can call whatever helper surface the installed runtime exposes.";
@@ -1584,14 +1584,17 @@ mod tests {
     }
 
     #[test]
-    fn screen_set_surfaces_mixed_layer_activation_validation() {
+    fn screen_set_allows_mixed_layer_updates_with_activation() {
         let registry = ScreenFieldRegistry::bundled().unwrap();
-        let error = execute_screen_set_with_registry(
-            &StaticDiscovery {
-                devices: vec![test_device("/dev/ttyACM0")],
-                error: None,
-            },
-            &mut FakeTransportFactory::default(),
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut transport_factory = FakeTransportFactory::default();
+
+        let output = execute_screen_set_with_registry(
+            &discovery,
+            &mut transport_factory,
             &TargetArgs::default(),
             &[
                 "persistent.title=Hello".to_string(),
@@ -1600,12 +1603,10 @@ mod tests {
             Some("slow".to_string()),
             &registry,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(
-            error.to_string(),
-            "screen set --activate slow only supports slow-layer assignments, but `persistent.title` belongs to the persistent layer"
-        );
+        assert!(output.contains("Sent curated screen update over the immediate path."));
+        assert_eq!(transport_factory.open_calls().len(), 1);
     }
 
     #[test]
