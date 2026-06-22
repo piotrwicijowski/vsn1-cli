@@ -14,7 +14,8 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::device::{
-    discover_supported_devices, select_single_device, DeviceDiscovery, SystemDeviceDiscovery,
+    discover_supported_devices, select_device, DeviceDiscovery, DiscoveredDevice,
+    SystemDeviceDiscovery,
 };
 use crate::raw::send_screen_raw;
 use crate::runtime::{
@@ -34,7 +35,7 @@ pub use error::{Error, Result};
 
 const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install <name>` to provision a discovered runtime that the curated runtime-defined layered `screen` helpers expect.";
 const DEVICE_INFO_AFTER_HELP: &str =
-    "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --dx 0 --dy 0";
+    "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --device /dev/cu.usbmodem101\n  vsn1-cli device info --dx 0 --dy 0";
 const RUNTIME_LIST_AFTER_HELP: &str = "Lists discovered runtime names and the source copy that won resolution. Discovery precedence is dev > user > system on directory-name collisions.";
 const RUNTIME_INSTALL_AFTER_HELP: &str = "Installs the selected discovered runtime into the manifest-owned slots, captures a pre-install backup under ~/.config/vsn1-cli/pre-install, freezes the runtime under ~/.config/vsn1-cli/runtime, and verifies an exact installed-runtime match.";
 const RUNTIME_VERIFY_AFTER_HELP: &str = "Fails unless every owned runtime slot matches the frozen installed runtime copy under ~/.config/vsn1-cli/runtime exactly.";
@@ -236,6 +237,13 @@ pub enum ScreenCommand {
 pub struct TargetArgs {
     #[arg(
         long,
+        value_name = "PATH",
+        help = "Explicit USB serial device path; omit to auto-select when exactly one supported device is visible",
+        help_heading = "Device"
+    )]
+    pub device: Option<String>,
+    #[arg(
+        long,
         help = "Explicit module x coordinate; omit both --dx and --dy to use broadcast targeting",
         help_heading = "Targeting"
     )]
@@ -399,8 +407,7 @@ where
     F: SerialTransportFactory,
 {
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let _transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
 
     Ok(format!(
@@ -420,8 +427,7 @@ where
     F: SerialTransportFactory,
 {
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let mut transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
 
     send_screen_raw(&mut transport, target.grid_target(), lua)?;
@@ -574,8 +580,7 @@ where
     F: SerialTransportFactory,
 {
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let mut transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     send_screen_raw(&mut transport, target.grid_target(), lua)?;
 
@@ -595,8 +600,7 @@ where
     F: SerialTransportFactory,
 {
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = verify_installed_runtime(target, &mut reader)?;
@@ -621,8 +625,7 @@ where
 {
     let runtime = resolve_runtime(runtime_name)?;
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = install_runtime_with_bundle_dir(&runtime.path, target, &mut reader)?;
@@ -645,8 +648,7 @@ where
     F: SerialTransportFactory,
 {
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = inspect_installed_runtime(target, &mut reader)?;
@@ -669,8 +671,7 @@ where
 {
     let runtime = resolve_runtime(runtime_name)?;
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = upgrade_runtime_with_bundle_dir(&runtime.path, target, &mut reader)?;
@@ -693,8 +694,7 @@ where
     F: SerialTransportFactory,
 {
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = repair_installed_runtime(target, &mut reader)?;
@@ -716,8 +716,7 @@ where
     F: SerialTransportFactory,
 {
     let target = resolve_target(target_args)?;
-    let devices = discover_supported_devices(discovery)?;
-    let device = select_single_device(&devices)?;
+    let device = resolve_usb_device(discovery, target_args)?;
     let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = remove_installed_runtime(target, &mut reader)?;
@@ -790,6 +789,14 @@ fn render_runtime_output(
     }
 
     output
+}
+
+fn resolve_usb_device(
+    discovery: &impl DeviceDiscovery,
+    target_args: &TargetArgs,
+) -> Result<DiscoveredDevice> {
+    let devices = discover_supported_devices(discovery)?;
+    Ok(select_device(&devices, target_args.device.as_deref())?)
 }
 
 fn render_runtime_status_without_local_copy_output(
@@ -1166,8 +1173,36 @@ mod tests {
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs {
+                            device: None,
                             dx: Some(1),
                             dy: Some(2),
+                        },
+                    },
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_device_info_with_explicit_device() {
+        let cli = try_parse_from([
+            "vsn1-cli",
+            "device",
+            "info",
+            "--device",
+            "/dev/cu.usbmodem101",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::Info {
+                        target: TargetArgs {
+                            device: Some("/dev/cu.usbmodem101".to_string()),
+                            dx: None,
+                            dy: None,
                         },
                     },
                 }),
@@ -1236,6 +1271,7 @@ mod tests {
                     command: RuntimeCommand::Upgrade {
                         name: "default".to_string(),
                         target: TargetArgs {
+                            device: None,
                             dx: Some(0),
                             dy: Some(0),
                         },
@@ -1273,6 +1309,7 @@ mod tests {
                         ],
                         activate: Some("slow".to_string()),
                         target: TargetArgs {
+                            device: None,
                             dx: Some(1),
                             dy: Some(2),
                         },
@@ -1412,7 +1449,76 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "multiple supported VSN1/Grid USB serial devices found (/dev/ttyACM0, /dev/ttyACM1); `device info` currently requires exactly one visible device"
+            "multiple supported VSN1/Grid USB serial devices found (/dev/ttyACM0, /dev/ttyACM1); rerun with `--device <path>` to select one explicitly"
+        );
+    }
+
+    #[test]
+    fn device_info_uses_the_requested_device_when_multiple_devices_are_visible() {
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0"), test_device("/dev/ttyACM1")],
+            error: None,
+        };
+        let mut transport_factory = FakeTransportFactory::default();
+
+        let output = execute_cli(
+            Cli {
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::Info {
+                        target: TargetArgs {
+                            device: Some("/dev/ttyACM1".to_string()),
+                            dx: None,
+                            dy: None,
+                        },
+                    },
+                }),
+            },
+            &discovery,
+            &mut transport_factory,
+        )
+        .unwrap();
+
+        assert!(output.contains("Selected USB device: /dev/ttyACM1"));
+        assert_eq!(
+            transport_factory.open_calls(),
+            &[OpenCall {
+                port_name: "/dev/ttyACM1".to_string(),
+                baud_rate: protocol::GRID_BAUD_RATE,
+            }]
+        );
+    }
+
+    #[test]
+    fn device_info_auto_selects_the_macos_callout_device_for_a_tty_cu_pair() {
+        let discovery = StaticDiscovery {
+            devices: vec![
+                test_device("/dev/tty.usbmodem101"),
+                test_device("/dev/cu.usbmodem101"),
+            ],
+            error: None,
+        };
+        let mut transport_factory = FakeTransportFactory::default();
+
+        let output = execute_cli(
+            Cli {
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::Info {
+                        target: TargetArgs::default(),
+                    },
+                }),
+            },
+            &discovery,
+            &mut transport_factory,
+        )
+        .unwrap();
+
+        assert!(output.contains("Selected USB device: /dev/cu.usbmodem101"));
+        assert_eq!(
+            transport_factory.open_calls(),
+            &[OpenCall {
+                port_name: "/dev/cu.usbmodem101".to_string(),
+                baud_rate: protocol::GRID_BAUD_RATE,
+            }]
         );
     }
 
@@ -1427,6 +1533,7 @@ mod tests {
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Remove {
                         target: TargetArgs {
+                            device: None,
                             dx: Some(0),
                             dy: Some(0),
                         },
@@ -1447,6 +1554,7 @@ mod tests {
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Remove {
                         target: TargetArgs {
+                            device: None,
                             dx: Some(0),
                             dy: Some(0),
                         },
@@ -1470,6 +1578,7 @@ mod tests {
                     command: ScreenCommand::Raw {
                         lua: "return 1".to_string(),
                         target: TargetArgs {
+                            device: None,
                             dx: Some(1),
                             dy: Some(2),
                         },
@@ -1507,6 +1616,7 @@ mod tests {
                     command: ScreenCommand::Raw {
                         lua: "return 1".to_string(),
                         target: TargetArgs {
+                            device: None,
                             dx: Some(1),
                             dy: None,
                         },
@@ -1665,6 +1775,7 @@ mod tests {
             &discovery,
             &mut transport_factory,
             &TargetArgs {
+                device: None,
                 dx: Some(0),
                 dy: Some(0),
             },

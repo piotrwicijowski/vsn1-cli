@@ -6,9 +6,17 @@ use serialport::{SerialPortInfo, SerialPortType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceError {
-    DiscoveryFailed { message: String },
+    DiscoveryFailed {
+        message: String,
+    },
     NoSupportedDevice,
-    AmbiguousDeviceSelection { port_names: Vec<String> },
+    AmbiguousDeviceSelection {
+        port_names: Vec<String>,
+    },
+    RequestedDeviceNotFound {
+        requested: String,
+        port_names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +85,17 @@ impl fmt::Display for DeviceError {
             Self::AmbiguousDeviceSelection { port_names } => {
                 write!(
                     f,
-                    "multiple supported VSN1/Grid USB serial devices found ({}); `device info` currently requires exactly one visible device",
+                    "multiple supported VSN1/Grid USB serial devices found ({}); rerun with `--device <path>` to select one explicitly",
+                    port_names.join(", ")
+                )
+            }
+            Self::RequestedDeviceNotFound {
+                requested,
+                port_names,
+            } => {
+                write!(
+                    f,
+                    "requested USB serial device `{requested}` was not found among supported VSN1/Grid devices ({})",
                     port_names.join(", ")
                 )
             }
@@ -130,7 +148,28 @@ impl DeviceDiscovery for SystemDeviceDiscovery {
 pub fn discover_supported_devices(
     discovery: &impl DeviceDiscovery,
 ) -> std::result::Result<Vec<DiscoveredDevice>, DeviceError> {
-    discovery.discover()
+    Ok(normalize_discovered_devices(discovery.discover()?))
+}
+
+pub fn select_device(
+    devices: &[DiscoveredDevice],
+    requested_port_name: Option<&str>,
+) -> std::result::Result<DiscoveredDevice, DeviceError> {
+    if let Some(requested_port_name) = requested_port_name {
+        return devices
+            .iter()
+            .find(|device| device.port_name == requested_port_name)
+            .cloned()
+            .ok_or_else(|| DeviceError::RequestedDeviceNotFound {
+                requested: requested_port_name.to_string(),
+                port_names: devices
+                    .iter()
+                    .map(|device| device.port_name.clone())
+                    .collect(),
+            });
+    }
+
+    select_single_device(devices)
 }
 
 pub fn select_single_device(
@@ -172,6 +211,61 @@ fn device_path_exists(port_name: &str) -> bool {
     Path::new(port_name).exists()
 }
 
+fn normalize_discovered_devices(devices: Vec<DiscoveredDevice>) -> Vec<DiscoveredDevice> {
+    let mut normalized = Vec::with_capacity(devices.len());
+
+    for device in devices {
+        match normalized
+            .iter_mut()
+            .find(|existing| are_macos_tty_cu_aliases(existing, &device))
+        {
+            Some(existing) if prefers_device(&device, existing) => *existing = device,
+            Some(_) => {}
+            None => normalized.push(device),
+        }
+    }
+
+    normalized.sort_by(|left, right| left.port_name.cmp(&right.port_name));
+    normalized
+}
+
+fn are_macos_tty_cu_aliases(left: &DiscoveredDevice, right: &DiscoveredDevice) -> bool {
+    let Some(left_suffix) = macos_serial_suffix(&left.port_name) else {
+        return false;
+    };
+    let Some(right_suffix) = macos_serial_suffix(&right.port_name) else {
+        return false;
+    };
+
+    left_suffix == right_suffix
+        && left.vendor_id == right.vendor_id
+        && left.product_id == right.product_id
+        && left.serial_number == right.serial_number
+        && left.manufacturer == right.manufacturer
+        && left.product == right.product
+        && left.known_label == right.known_label
+}
+
+fn macos_serial_suffix(port_name: &str) -> Option<&str> {
+    port_name
+        .strip_prefix("/dev/cu.")
+        .or_else(|| port_name.strip_prefix("/dev/tty."))
+}
+
+fn prefers_device(candidate: &DiscoveredDevice, existing: &DiscoveredDevice) -> bool {
+    device_preference_rank(&candidate.port_name) < device_preference_rank(&existing.port_name)
+}
+
+fn device_preference_rank(port_name: &str) -> u8 {
+    if port_name.starts_with("/dev/cu.") {
+        0
+    } else if port_name.starts_with("/dev/tty.") {
+        1
+    } else {
+        2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +293,21 @@ mod tests {
     }
 
     #[test]
+    fn collapses_macos_tty_cu_pairs_to_the_callout_device() {
+        let discovery = StaticDiscovery {
+            devices: vec![
+                test_device("/dev/tty.usbmodem101"),
+                test_device("/dev/cu.usbmodem101"),
+            ],
+        };
+
+        let devices = discover_supported_devices(&discovery).unwrap();
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].port_name, "/dev/cu.usbmodem101");
+    }
+
+    #[test]
     fn fails_when_multiple_supported_devices_are_visible() {
         let devices = vec![test_device("/dev/ttyACM0"), test_device("/dev/ttyACM1")];
 
@@ -208,6 +317,30 @@ mod tests {
             error,
             DeviceError::AmbiguousDeviceSelection {
                 port_names: vec!["/dev/ttyACM0".to_string(), "/dev/ttyACM1".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn selects_the_requested_device_when_multiple_supported_devices_are_visible() {
+        let devices = vec![test_device("/dev/ttyACM0"), test_device("/dev/ttyACM1")];
+
+        let selected = select_device(&devices, Some("/dev/ttyACM1")).unwrap();
+
+        assert_eq!(selected.port_name, "/dev/ttyACM1");
+    }
+
+    #[test]
+    fn fails_when_the_requested_device_is_not_visible() {
+        let devices = vec![test_device("/dev/ttyACM0")];
+
+        let error = select_device(&devices, Some("/dev/ttyACM1")).unwrap_err();
+
+        assert_eq!(
+            error,
+            DeviceError::RequestedDeviceNotFound {
+                requested: "/dev/ttyACM1".to_string(),
+                port_names: vec!["/dev/ttyACM0".to_string()],
             }
         );
     }

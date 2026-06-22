@@ -96,6 +96,7 @@ mod tests {
     #[test]
     fn resolves_explicit_target_when_both_coordinates_are_present() {
         let resolved = resolve_target(&TargetArgs {
+            device: None,
             dx: Some(1),
             dy: Some(2),
         })
@@ -107,6 +108,7 @@ mod tests {
     #[test]
     fn rejects_partial_coordinates() {
         let error = resolve_target(&TargetArgs {
+            device: None,
             dx: Some(1),
             dy: None,
         })
@@ -118,6 +120,7 @@ mod tests {
     #[test]
     fn rejects_coordinates_outside_the_grid_wire_range() {
         let error = resolve_target(&TargetArgs {
+            device: None,
             dx: Some(129),
             dy: Some(0),
         })
