@@ -258,6 +258,85 @@ pub struct TargetArgs {
     pub dy: Option<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandSuccess {
+    DeviceList {
+        devices: Vec<DiscoveredDevice>,
+    },
+    DeviceInfo {
+        device: String,
+        target: ResolvedTarget,
+    },
+    RuntimeList {
+        runtimes: Vec<DiscoveredRuntime>,
+    },
+    ScreenAction {
+        device: String,
+        target: ResolvedTarget,
+        action: &'static str,
+    },
+    RuntimeStatus {
+        device: String,
+        target: ResolvedTarget,
+        report: Option<RuntimeInspectionReport>,
+        verified: bool,
+    },
+    RuntimeInstall {
+        device: String,
+        target: ResolvedTarget,
+        runtime: Option<DiscoveredRuntime>,
+        report: RuntimeInstallReport,
+    },
+    RuntimeUpgrade {
+        device: String,
+        target: ResolvedTarget,
+        runtime: DiscoveredRuntime,
+        report: RuntimeUpgradeReport,
+    },
+    RuntimeRepair {
+        device: String,
+        target: ResolvedTarget,
+        report: RuntimeInstallReport,
+    },
+    RuntimeRemove {
+        device: String,
+        target: ResolvedTarget,
+        report: RuntimeRemoveReport,
+    },
+}
+
+pub trait CommandExecutor {
+    fn execute(&mut self, request: CommandRequest) -> Result<CommandSuccess>;
+}
+
+pub struct OneShotCommandExecutor<'a, D, F> {
+    discovery: &'a D,
+    transport_factory: &'a mut F,
+}
+
+impl<'a, D, F> OneShotCommandExecutor<'a, D, F> {
+    pub fn new(discovery: &'a D, transport_factory: &'a mut F) -> Self {
+        Self {
+            discovery,
+            transport_factory,
+        }
+    }
+}
+
+impl<D, F> CommandExecutor for OneShotCommandExecutor<'_, D, F>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    fn execute(&mut self, request: CommandRequest) -> Result<CommandSuccess> {
+        execute_command_request_with_one_shot_transport(
+            request,
+            self.discovery,
+            self.transport_factory,
+        )
+    }
+}
+
 pub fn command() -> clap::Command {
     Cli::command()
 }
@@ -283,11 +362,8 @@ where
 pub fn run(cli: Cli) -> Result<()> {
     let discovery = SystemDeviceDiscovery;
     let mut transport_factory = SystemTransportFactory;
-    let output = execute_command_request(
-        CommandRequest::from(cli),
-        &discovery,
-        &mut transport_factory,
-    )?;
+    let mut executor = OneShotCommandExecutor::new(&discovery, &mut transport_factory);
+    let output = execute_and_render_command(&mut executor, CommandRequest::from(cli))?;
     print!("{output}");
     Ok(())
 }
@@ -297,7 +373,7 @@ pub fn main() -> ExitCode {
         Ok(cli) => match run(cli) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("error: {error}");
+                eprintln!("{}", render_command_error(&error));
                 ExitCode::FAILURE
             }
         },
@@ -312,29 +388,93 @@ pub fn main() -> ExitCode {
     }
 }
 
+pub fn execute_and_render_command(
+    executor: &mut impl CommandExecutor,
+    request: CommandRequest,
+) -> Result<String> {
+    executor
+        .execute(request)
+        .map(|success| render_command_success(&success))
+}
+
+pub fn render_command_success(success: &CommandSuccess) -> String {
+    match success {
+        CommandSuccess::DeviceList { devices } => render_device_list_output(devices),
+        CommandSuccess::DeviceInfo { device, target } => {
+            render_transport_open_output(device, *target, None)
+        }
+        CommandSuccess::RuntimeList { runtimes } => render_runtime_list(runtimes),
+        CommandSuccess::ScreenAction {
+            device,
+            target,
+            action,
+        } => render_transport_open_output(
+            device,
+            *target,
+            Some(format!("Sent {action} over the immediate path.\n")),
+        ),
+        CommandSuccess::RuntimeStatus {
+            device,
+            target,
+            report,
+            verified,
+        } => match report {
+            Some(report) => render_runtime_output(device, *target, report, *verified),
+            None => render_runtime_status_without_local_copy_output(device, *target),
+        },
+        CommandSuccess::RuntimeInstall {
+            device,
+            target,
+            runtime,
+            report,
+        } => render_runtime_install_output(device, *target, runtime.as_ref(), report),
+        CommandSuccess::RuntimeUpgrade {
+            device,
+            target,
+            runtime,
+            report,
+        } => render_runtime_upgrade_output(device, *target, runtime, report),
+        CommandSuccess::RuntimeRepair {
+            device,
+            target,
+            report,
+        } => render_runtime_repair_output(device, *target, report),
+        CommandSuccess::RuntimeRemove {
+            device,
+            target,
+            report,
+        } => render_runtime_remove_output(device, *target, report),
+    }
+}
+
+pub fn render_command_error(error: &Error) -> String {
+    format!("error: {error}")
+}
+
 #[cfg(test)]
 fn execute_cli<D, F>(cli: Cli, discovery: &D, transport_factory: &mut F) -> Result<String>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
 {
-    execute_command_request(CommandRequest::from(cli), discovery, transport_factory)
+    let mut executor = OneShotCommandExecutor::new(discovery, transport_factory);
+    execute_and_render_command(&mut executor, CommandRequest::from(cli))
 }
 
-fn execute_command_request<D, F>(
+fn execute_command_request_with_one_shot_transport<D, F>(
     request: CommandRequest,
     discovery: &D,
     transport_factory: &mut F,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
 {
     match request {
         CommandRequest::Device(command) => match command {
-            DeviceRequest::List => render_device_list(discovery),
+            DeviceRequest::List => execute_device_list(discovery),
             DeviceRequest::Info { target } => {
-                render_device_info(discovery, transport_factory, &target)
+                execute_device_info(discovery, transport_factory, &target)
             }
         },
         CommandRequest::Runtime(command) => match command {
@@ -383,11 +523,15 @@ where
     }
 }
 
-fn render_device_list(discovery: &impl DeviceDiscovery) -> Result<String> {
+fn execute_device_list(discovery: &impl DeviceDiscovery) -> Result<CommandSuccess> {
     let devices = discover_supported_devices(discovery)?;
 
+    Ok(CommandSuccess::DeviceList { devices })
+}
+
+fn render_device_list_output(devices: &[DiscoveredDevice]) -> String {
     if devices.is_empty() {
-        return Ok("No supported VSN1/Grid USB serial devices found.\n".to_string());
+        return "No supported VSN1/Grid USB serial devices found.\n".to_string();
     }
 
     let mut output = String::from("Discovered supported VSN1/Grid USB serial devices:\n");
@@ -398,20 +542,20 @@ fn render_device_list(discovery: &impl DeviceDiscovery) -> Result<String> {
         output.push('\n');
     }
 
-    Ok(output)
+    output
 }
 
-fn execute_runtime_list() -> Result<String> {
+fn execute_runtime_list() -> Result<CommandSuccess> {
     let runtimes = discover_runtimes()?;
 
-    if runtimes.is_empty() {
-        return Ok("No runtimes found in system, user, or dev runtime roots.\n".to_string());
-    }
-
-    Ok(render_runtime_list(&runtimes))
+    Ok(CommandSuccess::RuntimeList { runtimes })
 }
 
 fn render_runtime_list(runtimes: &[DiscoveredRuntime]) -> String {
+    if runtimes.is_empty() {
+        return "No runtimes found in system, user, or dev runtime roots.\n".to_string();
+    }
+
     let mut output = String::from("Discovered runtimes:\n");
 
     for runtime in runtimes {
@@ -426,11 +570,11 @@ fn render_runtime_list(runtimes: &[DiscoveredRuntime]) -> String {
     output
 }
 
-fn render_device_info<D, F>(
+fn execute_device_info<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -439,10 +583,10 @@ where
     let device = resolve_usb_device(discovery, target_args)?;
     let _transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
 
-    Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\n",
-        protocol::GRID_BAUD_RATE
-    ))
+    Ok(CommandSuccess::DeviceInfo {
+        device: device.to_string(),
+        target,
+    })
 }
 
 fn execute_screen_raw<D, F>(
@@ -450,7 +594,7 @@ fn execute_screen_raw<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     lua: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -461,10 +605,11 @@ where
 
     send_screen_raw(&mut transport, target.grid_target(), lua)?;
 
-    Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\nSent raw screen update over the immediate path.\n",
-        protocol::GRID_BAUD_RATE
-    ))
+    Ok(CommandSuccess::ScreenAction {
+        device: device.to_string(),
+        target,
+        action: "raw screen update",
+    })
 }
 
 fn execute_screen_set<D, F>(
@@ -473,7 +618,7 @@ fn execute_screen_set<D, F>(
     target_args: &TargetArgs,
     assignments: &[String],
     activate: Option<String>,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -496,7 +641,7 @@ fn execute_screen_set_with_registry<D, F>(
     assignments: &[String],
     activate: Option<String>,
     registry: &ScreenFieldRegistry,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -522,7 +667,7 @@ fn execute_screen_clear<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     layer: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -537,7 +682,7 @@ fn execute_screen_clear_with_registry<D, F>(
     target_args: &TargetArgs,
     layer: &str,
     registry: &ScreenFieldRegistry,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -559,7 +704,7 @@ fn execute_screen_activate<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     layer: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -580,7 +725,7 @@ fn execute_screen_activate_with_registry<D, F>(
     target_args: &TargetArgs,
     layer: &str,
     registry: &ScreenFieldRegistry,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -603,7 +748,7 @@ fn execute_curated_screen_lua<D, F>(
     target_args: &TargetArgs,
     lua: &str,
     action: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -613,17 +758,25 @@ where
     let mut transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     send_screen_raw(&mut transport, target.grid_target(), lua)?;
 
-    Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\nSent {action} over the immediate path.\n",
-        protocol::GRID_BAUD_RATE,
-    ))
+    let action = match action {
+        "curated screen update" => "curated screen update",
+        "screen clear command" => "screen clear command",
+        "screen activation command" => "screen activation command",
+        _ => unreachable!("screen action should use one of the known static labels"),
+    };
+
+    Ok(CommandSuccess::ScreenAction {
+        device: device.to_string(),
+        target,
+        action,
+    })
 }
 
 fn execute_runtime_verify<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -634,12 +787,12 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = verify_installed_runtime(target, &mut reader)?;
 
-    Ok(render_runtime_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeStatus {
+        device: device.to_string(),
         target,
-        &report,
-        true,
-    ))
+        report: Some(report),
+        verified: true,
+    })
 }
 
 fn execute_runtime_install<D, F>(
@@ -647,7 +800,7 @@ fn execute_runtime_install<D, F>(
     transport_factory: &mut F,
     runtime_name: &str,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -659,19 +812,19 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = install_runtime_with_bundle_dir(&runtime.path, target, &mut reader)?;
 
-    Ok(render_runtime_install_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeInstall {
+        device: device.to_string(),
         target,
-        Some(&runtime),
-        &report,
-    ))
+        runtime: Some(runtime),
+        report,
+    })
 }
 
 fn execute_runtime_status<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -682,9 +835,11 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = inspect_installed_runtime(target, &mut reader)?;
 
-    Ok(match report {
-        Some(report) => render_runtime_output(&device.to_string(), target, &report, false),
-        None => render_runtime_status_without_local_copy_output(&device.to_string(), target),
+    Ok(CommandSuccess::RuntimeStatus {
+        device: device.to_string(),
+        target,
+        report,
+        verified: false,
     })
 }
 
@@ -693,7 +848,7 @@ fn execute_runtime_upgrade<D, F>(
     transport_factory: &mut F,
     runtime_name: &str,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -705,19 +860,19 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = upgrade_runtime_with_bundle_dir(&runtime.path, target, &mut reader)?;
 
-    Ok(render_runtime_upgrade_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeUpgrade {
+        device: device.to_string(),
         target,
-        &runtime,
-        &report,
-    ))
+        runtime,
+        report,
+    })
 }
 
 fn execute_runtime_repair<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -728,18 +883,18 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = repair_installed_runtime(target, &mut reader)?;
 
-    Ok(render_runtime_repair_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeRepair {
+        device: device.to_string(),
         target,
-        &report,
-    ))
+        report,
+    })
 }
 
 fn execute_runtime_remove<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -750,11 +905,28 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = remove_installed_runtime(target, &mut reader)?;
 
-    Ok(render_runtime_remove_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeRemove {
+        device: device.to_string(),
         target,
-        &report,
-    ))
+        report,
+    })
+}
+
+fn render_transport_open_output(
+    device: &str,
+    target: ResolvedTarget,
+    detail: Option<String>,
+) -> String {
+    let mut output = format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\n",
+        protocol::GRID_BAUD_RATE,
+    );
+
+    if let Some(detail) = detail {
+        output.push_str(&detail);
+    }
+
+    output
 }
 
 fn render_runtime_output(
@@ -1469,6 +1641,40 @@ mod tests {
     }
 
     #[test]
+    fn render_command_error_reuses_the_shared_error_format() {
+        let error = Error::from(TransportError::open("Device or resource busy"));
+
+        assert_eq!(
+            render_command_error(&error),
+            "error: transport open failed: Device or resource busy"
+        );
+    }
+
+    #[test]
+    fn direct_success_rendering_matches_execute_and_render_for_device_info() {
+        let request = CommandRequest::Device(DeviceRequest::Info {
+            target: TargetArgs::default(),
+        });
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&discovery, &mut direct_transport_factory);
+        let success = direct_executor.execute(request.clone()).unwrap();
+        let direct_output = render_command_success(&success);
+
+        let mut rendered_transport_factory = FakeTransportFactory::default();
+        let mut rendered_executor =
+            OneShotCommandExecutor::new(&discovery, &mut rendered_transport_factory);
+        let rendered_output = execute_and_render_command(&mut rendered_executor, request).unwrap();
+
+        assert_eq!(direct_output, rendered_output);
+        assert!(direct_output.contains("Transport: opened successfully at 2000000 baud"));
+    }
+
+    #[test]
     fn device_info_defaults_to_broadcast_and_opens_the_selected_transport() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],
@@ -1752,15 +1958,17 @@ mod tests {
         let mut transport_factory = FakeTransportFactory::default();
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let output = execute_screen_set_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs::default(),
-            &["persistent.title=Hello".to_string()],
-            None,
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_set_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs::default(),
+                &["persistent.title=Hello".to_string()],
+                None,
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
@@ -1775,18 +1983,20 @@ mod tests {
         };
         let mut transport_factory = FakeTransportFactory::default();
 
-        let output = execute_screen_set_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs::default(),
-            &[
-                "persistent.title=Hello".to_string(),
-                "slow.message=World".to_string(),
-            ],
-            Some("slow".to_string()),
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_set_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs::default(),
+                &[
+                    "persistent.title=Hello".to_string(),
+                    "slow.message=World".to_string(),
+                ],
+                Some("slow".to_string()),
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
@@ -1822,14 +2032,16 @@ mod tests {
         let mut transport_factory = FakeTransportFactory::default();
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let output = execute_screen_activate_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs::default(),
-            "persistent",
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_activate_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs::default(),
+                "persistent",
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent screen activation command over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
@@ -1844,19 +2056,21 @@ mod tests {
         let mut transport_factory = SingleOpenTransportFactory::new(Vec::new());
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let output = execute_screen_set_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs {
-                device: None,
-                dx: Some(0),
-                dy: Some(0),
-            },
-            &["persistent.title=Hello".to_string()],
-            None,
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_set_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs {
+                    device: None,
+                    dx: Some(0),
+                    dy: Some(0),
+                },
+                &["persistent.title=Hello".to_string()],
+                None,
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls.len(), 1);

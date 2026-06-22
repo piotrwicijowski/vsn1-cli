@@ -20,12 +20,12 @@ Use this checklist for the optional daemon-backed execution follow-up after the 
 ## Session handoff state
 
 - Overall status: `in_progress`
-- Last completed step: `step 1`
+- Last completed step: `step 2`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-22 after step 1 added a shared semantic command model, local-only vs daemon-eligible routing classification, and parse-to-request coverage without changing cold-path behavior)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-22 after step 2 added a shared CommandExecutor seam, centralized command success/error rendering, and output-parity regression coverage while preserving cold-path behavior)`
 - Last hardware validation: `none for this checklist`
 - Open blockers: `none`
-- Next session start point: `step 2`
+- Next session start point: `step 3`
 
 ## Rules for every step
 
@@ -146,7 +146,7 @@ Use this checklist for the optional daemon-backed execution follow-up after the 
 Update this section as work lands.
 
 - Step 1: `completed on 2026-06-22 - added src/command_model.rs with shared semantic request enums, local-only vs daemon-eligible routing classification, try_parse_command_request_from(...), and regression coverage while preserving the existing cold-path execution behavior`
-- Step 2: `pending`
+- Step 2: `completed on 2026-06-22 - introduced a shared CommandExecutor trait plus OneShotCommandExecutor, added centralized CommandSuccess and render_command_success/render_command_error handling, routed the current cold path through execute_and_render_command(...), and added regression coverage for direct success rendering parity and shared error formatting`
 - Step 3: `pending`
 - Step 4: `pending`
 - Step 5: `pending`
