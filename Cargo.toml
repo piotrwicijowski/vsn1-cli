@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "vsn1-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "vsn1-daemon"
+path = "src/bin/vsn1-daemon.rs"
+
 [dependencies]
 clap = { version = "4.5.8", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -20,12 +20,12 @@ Use this checklist for the optional daemon-backed execution follow-up after the 
 ## Session handoff state
 
 - Overall status: `in_progress`
-- Last completed step: `step 3`
+- Last completed step: `step 4`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 3 added versioned daemon protocol request/response types, serde JSON encode/decode helpers, local-only command rejection for daemon requests, and Linux/macOS socket-path resolution with env override support)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 4 added a minimal Unix-socket daemon server, a blocking vsn1-daemon binary entrypoint, one-request/one-response connection handling, ping health responses, placeholder execute-request error responses, and regression coverage for bind/listen behavior and simple request/response handling)`
 - Last hardware validation: `none for this checklist`
 - Open blockers: `none`
-- Next session start point: `step 4`
+- Next session start point: `step 5`
 
 ## Rules for every step
 
@@ -148,7 +148,7 @@ Update this section as work lands.
 - Step 1: `completed on 2026-06-22 - added src/command_model.rs with shared semantic request enums, local-only vs daemon-eligible routing classification, try_parse_command_request_from(...), and regression coverage while preserving the existing cold-path execution behavior`
 - Step 2: `completed on 2026-06-22 - introduced a shared CommandExecutor trait plus OneShotCommandExecutor, added centralized CommandSuccess and render_command_success/render_command_error handling, routed the current cold path through execute_and_render_command(...), and added regression coverage for direct success rendering parity and shared error formatting`
 - Step 3: `completed on 2026-06-22 - added src/daemon_protocol.rs with versioned DaemonRequest/DaemonResponse JSON encoding and decoding, explicit version-mismatch and local-only-command errors, added src/daemon_socket.rs with VSN1_DAEMON_SOCKET override plus Linux XDG_RUNTIME_DIR and macOS TMPDIR socket-path resolution, and added regression coverage for protocol round trips, mismatch handling, and socket-path resolution`
-- Step 4: `pending`
+- Step 4: `completed on 2026-06-22 - added src/daemon_server.rs with Unix listener bind/accept logic, parent-directory creation, non-socket path protection, one-request/one-response serving, ping health handling, placeholder execute-request error responses, and cleanup-on-drop behavior; added src/bin/vsn1-daemon.rs plus Cargo binary registration and a daemon_main() library entrypoint; added regression coverage for ping round trips, placeholder execute responses, and bind rejection for existing non-socket paths`
 - Step 5: `pending`
 - Step 6: `pending`
 - Step 7: `pending`

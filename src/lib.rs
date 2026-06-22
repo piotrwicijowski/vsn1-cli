@@ -1,5 +1,6 @@
 pub mod command_model;
 pub mod daemon_protocol;
+pub mod daemon_server;
 pub mod daemon_socket;
 pub mod device;
 mod error;
@@ -389,6 +390,31 @@ pub fn main() -> ExitCode {
                 .unwrap_or(ExitCode::FAILURE)
         }
     }
+}
+
+pub fn daemon_main() -> ExitCode {
+    let socket_path = match daemon_socket::resolve_daemon_socket_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let server = match daemon_server::DaemonServer::bind(&socket_path) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(error) = server.serve_forever() {
+        eprintln!("error: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
 }
 
 pub fn execute_and_render_command(
