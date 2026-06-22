@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+use crate::daemon_client::DaemonClientError;
 use crate::device::DeviceError;
 use crate::protocol::ProtocolError;
 use crate::runtime::RuntimeError;
@@ -13,6 +14,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    Daemon(DaemonClientError),
     Device(DeviceError),
     Protocol(ProtocolError),
     Runtime(RuntimeError),
@@ -25,6 +27,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Daemon(error) => error.fmt(f),
             Self::Device(error) => error.fmt(f),
             Self::Protocol(error) => error.fmt(f),
             Self::Runtime(error) => error.fmt(f),
@@ -39,6 +42,7 @@ impl fmt::Display for Error {
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
+            Self::Daemon(error) => Some(error),
             Self::Device(error) => Some(error),
             Self::Protocol(error) => Some(error),
             Self::Runtime(error) => Some(error),
@@ -47,6 +51,12 @@ impl StdError for Error {
             Self::Targeting(error) => Some(error),
             Self::Transport(error) => Some(error),
         }
+    }
+}
+
+impl From<DaemonClientError> for Error {
+    fn from(value: DaemonClientError) -> Self {
+        Self::Daemon(value)
     }
 }
 

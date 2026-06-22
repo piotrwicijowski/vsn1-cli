@@ -1,4 +1,5 @@
 pub mod command_model;
+pub mod daemon_client;
 pub mod daemon_protocol;
 pub mod daemon_server;
 pub mod daemon_socket;
@@ -19,6 +20,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use crate::command_model::{CommandRequest, DeviceRequest, RuntimeRequest, ScreenRequest};
+use crate::daemon_client::{DaemonCommandClient, SystemDaemonClient};
 use crate::device::{
     discover_supported_devices, select_device, DeviceDiscovery, DiscoveredDevice,
     SystemDeviceDiscovery,
@@ -367,7 +369,12 @@ pub fn run(cli: Cli) -> Result<()> {
     let discovery = SystemDeviceDiscovery;
     let mut transport_factory = SystemTransportFactory;
     let mut executor = OneShotCommandExecutor::new(&discovery, &mut transport_factory);
-    let output = execute_and_render_command(&mut executor, CommandRequest::from(cli))?;
+    let mut daemon_client = SystemDaemonClient::new();
+    let output = execute_and_render_command_with_optional_daemon(
+        &mut executor,
+        &mut daemon_client,
+        CommandRequest::from(cli),
+    )?;
     print!("{output}");
     Ok(())
 }
@@ -424,6 +431,20 @@ pub fn execute_and_render_command(
     executor
         .execute(request)
         .map(|success| render_command_success(&success))
+}
+
+pub fn execute_and_render_command_with_optional_daemon(
+    executor: &mut impl CommandExecutor,
+    daemon_client: &mut impl DaemonCommandClient,
+    request: CommandRequest,
+) -> Result<String> {
+    if request.is_daemon_eligible() {
+        if let Some(output) = daemon_client.try_execute(&request)? {
+            return Ok(output);
+        }
+    }
+
+    execute_and_render_command(executor, request)
 }
 
 pub fn render_command_success(success: &CommandSuccess) -> String {
@@ -1121,12 +1142,17 @@ fn render_runtime_remove_output(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::os::unix::net::UnixListener;
     use std::rc::Rc;
+    use std::thread;
 
+    use crate::daemon_client::{DaemonClientError, DaemonCommandClient, SystemDaemonClient};
+    use crate::daemon_server::DaemonServer;
     use crate::device::{DeviceError, DiscoveredDevice};
     use crate::transport::{
         FakeTransportFactory, OpenCall, SerialTransport, SerialTransportFactory, TransportError,
     };
+    use tempfile::tempdir;
 
     #[derive(Debug, Default)]
     struct RecordingTransport {
@@ -1286,6 +1312,61 @@ mod tests {
 
         fn immediate_writes(&self) -> Vec<Vec<u8>> {
             self.immediate_writes.borrow().clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingExecutor {
+        calls: Rc<RefCell<Vec<CommandRequest>>>,
+        response: Result<CommandSuccess>,
+    }
+
+    impl RecordingExecutor {
+        fn new(response: Result<CommandSuccess>) -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                response,
+            }
+        }
+
+        fn calls(&self) -> Vec<CommandRequest> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl CommandExecutor for RecordingExecutor {
+        fn execute(&mut self, request: CommandRequest) -> Result<CommandSuccess> {
+            self.calls.borrow_mut().push(request);
+            self.response.clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingDaemonClient {
+        calls: Rc<RefCell<Vec<CommandRequest>>>,
+        response: crate::daemon_client::Result<Option<String>>,
+    }
+
+    impl RecordingDaemonClient {
+        fn new(response: crate::daemon_client::Result<Option<String>>) -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                response,
+            }
+        }
+
+        fn calls(&self) -> Vec<CommandRequest> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl DaemonCommandClient for RecordingDaemonClient {
+        fn try_execute(
+            &mut self,
+            request: &CommandRequest,
+        ) -> crate::daemon_client::Result<Option<String>> {
+            self.calls.borrow_mut().push(request.clone());
+            self.response.clone()
         }
     }
 
@@ -1701,6 +1782,149 @@ mod tests {
 
         assert_eq!(direct_output, rendered_output);
         assert!(direct_output.contains("Transport: opened successfully at 2000000 baud"));
+    }
+
+    #[test]
+    fn local_only_requests_bypass_the_daemon_client() {
+        let request = CommandRequest::Device(DeviceRequest::List);
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = RecordingDaemonClient::new(Ok(Some("daemon output\n".to_string())));
+
+        let output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(output, "No supported VSN1/Grid USB serial devices found.\n");
+        assert_eq!(executor.calls(), vec![request]);
+        assert!(daemon_client.calls().is_empty());
+    }
+
+    #[test]
+    fn daemon_unavailable_falls_back_to_local_execution() {
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::ScreenAction {
+            device: "/dev/ttyACM0".to_string(),
+            target: ResolvedTarget::Broadcast,
+            action: "raw screen update",
+        }));
+        let mut daemon_client = RecordingDaemonClient::new(Ok(None));
+
+        let output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap();
+
+        assert!(output.contains("Sent raw screen update over the immediate path."));
+        assert_eq!(executor.calls(), vec![request.clone()]);
+        assert_eq!(daemon_client.calls(), vec![request]);
+    }
+
+    #[test]
+    fn daemon_errors_do_not_fall_back_to_local_execution() {
+        let request = CommandRequest::Runtime(RuntimeRequest::Verify {
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::RuntimeList {
+            runtimes: Vec::new(),
+        }));
+        let mut daemon_client = RecordingDaemonClient::new(Err(DaemonClientError::Execution {
+            message: "boom".to_string(),
+        }));
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "daemon execution failed: boom");
+        assert!(executor.calls().is_empty());
+        assert_eq!(daemon_client.calls(), vec![request]);
+    }
+
+    #[test]
+    fn stale_socket_falls_back_as_daemon_unavailable() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        drop(listener);
+
+        let request = CommandRequest::Runtime(RuntimeRequest::Verify {
+            target: TargetArgs::default(),
+        });
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let response = daemon_client.try_execute(&request).unwrap();
+
+        assert_eq!(response, None);
+    }
+
+    #[test]
+    fn missing_socket_falls_back_to_local_execution() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("missing.sock");
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::ScreenAction {
+            device: "/dev/ttyACM0".to_string(),
+            target: ResolvedTarget::Broadcast,
+            action: "raw screen update",
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap();
+
+        assert!(output.contains("Sent raw screen update over the immediate path."));
+        assert_eq!(executor.calls(), vec![request]);
+    }
+
+    #[test]
+    fn live_daemon_execution_errors_do_not_fall_back_locally() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind(&socket_path).unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Runtime(RuntimeRequest::Verify {
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::RuntimeList {
+            runtimes: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap_err();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon execution failed: daemon command execution path is not implemented yet"
+        );
+        assert!(executor.calls().is_empty());
     }
 
     #[test]
