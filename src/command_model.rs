@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{
     Cli, DeviceArgs, DeviceCommand, RuntimeArgs, RuntimeCommand, ScreenArgs, ScreenCommand,
     TargetArgs, TopLevelCommand,
@@ -9,20 +11,20 @@ pub enum CommandRouting {
     DaemonEligible,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandRequest {
     Device(DeviceRequest),
     Runtime(RuntimeRequest),
     Screen(ScreenRequest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceRequest {
     List,
     Info { target: TargetArgs },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeRequest {
     List,
     Install { name: String, target: TargetArgs },
@@ -33,7 +35,7 @@ pub enum RuntimeRequest {
     Status { target: TargetArgs },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScreenRequest {
     Set {
         assignments: Vec<String>,

@@ -1,4 +1,6 @@
 pub mod command_model;
+pub mod daemon_protocol;
+pub mod daemon_socket;
 pub mod device;
 mod error;
 pub mod protocol;
@@ -13,6 +15,7 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
 use crate::command_model::{CommandRequest, DeviceRequest, RuntimeRequest, ScreenRequest};
 use crate::device::{
@@ -235,7 +238,7 @@ pub enum ScreenCommand {
     },
 }
 
-#[derive(Debug, Args, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Args, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetArgs {
     #[arg(
         long,
