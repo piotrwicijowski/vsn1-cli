@@ -398,10 +398,14 @@ mod tests {
     use crate::daemon_protocol::{decode_response, encode_request};
     use crate::daemon_server::DaemonServer;
     use crate::device::{DeviceError, DiscoveredDevice};
-    use crate::transport::FakeTransportFactory;
+    use crate::transport::{
+        FakeTransportFactory, SerialTransport, SerialTransportFactory, TransportError,
+    };
     use std::io::{Read, Write};
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
     use std::thread;
     use tempfile::tempdir;
 
@@ -416,6 +420,117 @@ mod tests {
                 Some(error) => Err(error.clone()),
                 None => Ok(self.devices.clone()),
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingTransportFactory {
+        state: Arc<TestTransportState>,
+    }
+
+    struct BlockingTransport {
+        port_name: String,
+        state: Arc<TestTransportState>,
+    }
+
+    #[derive(Default)]
+    struct TestTransportState {
+        blockers: Mutex<std::collections::HashMap<String, Arc<WriteBlocker>>>,
+        start_sender: Mutex<Option<mpsc::Sender<String>>>,
+    }
+
+    struct WriteBlocker {
+        released: AtomicBool,
+        mutex: Mutex<()>,
+        condvar: Condvar,
+    }
+
+    impl WriteBlocker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                released: AtomicBool::new(false),
+                mutex: Mutex::new(()),
+                condvar: Condvar::new(),
+            })
+        }
+
+        fn wait(&self) {
+            let mut guard = self.mutex.lock().unwrap();
+            while !self.released.load(Ordering::SeqCst) {
+                guard = self.condvar.wait(guard).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            self.condvar.notify_all();
+        }
+    }
+
+    impl TestTransportState {
+        fn install_blocker(&self, port_name: &str) -> Arc<WriteBlocker> {
+            let blocker = WriteBlocker::new();
+            self.blockers
+                .lock()
+                .unwrap()
+                .insert(port_name.to_string(), Arc::clone(&blocker));
+            blocker
+        }
+
+        fn set_start_sender(&self, sender: mpsc::Sender<String>) {
+            *self.start_sender.lock().unwrap() = Some(sender);
+        }
+    }
+
+    impl SerialTransportFactory for BlockingTransportFactory {
+        type Transport = BlockingTransport;
+
+        fn open(
+            &mut self,
+            port_name: &str,
+            _baud_rate: u32,
+        ) -> std::result::Result<Self::Transport, TransportError> {
+            Ok(BlockingTransport {
+                port_name: port_name.to_string(),
+                state: Arc::clone(&self.state),
+            })
+        }
+    }
+
+    impl SerialTransport for BlockingTransport {
+        fn write_immediate(&mut self, _packet: &[u8]) -> std::result::Result<(), TransportError> {
+            if let Some(sender) = self.state.start_sender.lock().unwrap().as_ref() {
+                sender.send(self.port_name.clone()).unwrap();
+            }
+
+            if let Some(blocker) = self
+                .state
+                .blockers
+                .lock()
+                .unwrap()
+                .get(&self.port_name)
+                .cloned()
+            {
+                blocker.wait();
+            }
+
+            Ok(())
+        }
+
+        fn write_config(&mut self, _packet: &[u8]) -> std::result::Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn bytes_to_read(&self) -> std::result::Result<u32, TransportError> {
+            Ok(0)
+        }
+
+        fn read(&mut self, _buffer: &mut [u8]) -> std::result::Result<usize, TransportError> {
+            Ok(0)
+        }
+
+        fn clear_input(&mut self) -> std::result::Result<(), TransportError> {
+            Ok(())
         }
     }
 
@@ -460,6 +575,142 @@ mod tests {
                 output: "Selected USB device: /dev/ttyACM0 [Grid / VSN1] VID:PID 03eb:ecac product=VSN1 manufacturer=Intech serial=ABC123\nTransport: opened successfully at 2000000 baud\nModule target: broadcast\nSent raw screen update over the immediate path.\n".to_string()
             }
         );
+    }
+
+    #[test]
+    fn same_device_requests_queue_safely_through_the_live_daemon() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let transport_factory = BlockingTransportFactory::default();
+        let state = Arc::clone(&transport_factory.state);
+        let blocker = state.install_blocker("/dev/ttyACM0");
+        let (start_sender, start_receiver) = mpsc::channel();
+        state.set_start_sender(start_sender);
+
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                transport_factory,
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_count(2));
+
+        let first_client = spawn_screen_raw_client(&socket_path, "/dev/ttyACM0");
+        assert_eq!(
+            start_receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .unwrap(),
+            "/dev/ttyACM0"
+        );
+
+        let second_client = spawn_screen_raw_client(&socket_path, "/dev/ttyACM0");
+        assert!(start_receiver
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+
+        blocker.release();
+        assert_eq!(
+            start_receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .unwrap(),
+            "/dev/ttyACM0"
+        );
+
+        let first_response = first_client.join().unwrap();
+        let second_response = second_client.join().unwrap();
+        server_thread.join().unwrap().unwrap();
+
+        assert!(matches!(first_response, DaemonResponse::Success { .. }));
+        assert!(matches!(second_response, DaemonResponse::Success { .. }));
+    }
+
+    #[test]
+    fn different_devices_progress_independently_through_the_live_daemon() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let transport_factory = BlockingTransportFactory::default();
+        let state = Arc::clone(&transport_factory.state);
+        let blocker_a = state.install_blocker("/dev/ttyACM0");
+        let blocker_b = state.install_blocker("/dev/ttyACM1");
+        let (start_sender, start_receiver) = mpsc::channel();
+        state.set_start_sender(start_sender);
+
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0"), test_device("/dev/ttyACM1")],
+                    error: None,
+                },
+                transport_factory,
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_count(2));
+
+        let first_client = spawn_screen_raw_client(&socket_path, "/dev/ttyACM0");
+        let second_client = spawn_screen_raw_client(&socket_path, "/dev/ttyACM1");
+
+        let first_start = start_receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
+        let second_start = start_receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
+        let mut starts = vec![first_start, second_start];
+        starts.sort();
+
+        assert_eq!(
+            starts,
+            vec!["/dev/ttyACM0".to_string(), "/dev/ttyACM1".to_string()]
+        );
+
+        blocker_a.release();
+        blocker_b.release();
+
+        let first_response = first_client.join().unwrap();
+        let second_response = second_client.join().unwrap();
+        server_thread.join().unwrap().unwrap();
+
+        assert!(matches!(first_response, DaemonResponse::Success { .. }));
+        assert!(matches!(second_response, DaemonResponse::Success { .. }));
+    }
+
+    fn spawn_screen_raw_client(
+        socket_path: &std::path::Path,
+        device_path: &str,
+    ) -> thread::JoinHandle<DaemonResponse> {
+        let socket_path = socket_path.to_path_buf();
+        let device_path = device_path.to_string();
+
+        thread::spawn(move || {
+            let mut client = UnixStream::connect(&socket_path).unwrap();
+            let request = encode_request(
+                &DaemonRequest::for_command(CommandRequest::Screen(ScreenRequest::Raw {
+                    lua: "return 1".to_string(),
+                    target: TargetArgs {
+                        device: Some(device_path),
+                        dx: None,
+                        dy: None,
+                    },
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            client.write_all(&request).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+
+            let mut response_bytes = Vec::new();
+            client.read_to_end(&mut response_bytes).unwrap();
+            decode_response(&response_bytes).unwrap()
+        })
     }
 
     fn test_device(port_name: &str) -> DiscoveredDevice {

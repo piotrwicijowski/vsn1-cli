@@ -4,6 +4,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread;
 
 use crate::daemon_protocol::{decode_request, encode_response, DaemonRequest, DaemonResponse};
 
@@ -20,7 +22,7 @@ pub struct PlaceholderDaemonRequestHandler;
 pub struct DaemonServer<H = PlaceholderDaemonRequestHandler> {
     listener: UnixListener,
     socket_path: PathBuf,
-    handler: H,
+    handler: Arc<H>,
 }
 
 impl<H> fmt::Debug for DaemonServer<H> {
@@ -77,7 +79,7 @@ where
         Ok(Self {
             listener,
             socket_path: socket_path.to_path_buf(),
-            handler,
+            handler: Arc::new(handler),
         })
     }
 
@@ -87,7 +89,12 @@ where
 
     pub fn serve_forever(&self) -> io::Result<()> {
         loop {
-            self.serve_one()?;
+            let (stream, _) = self.listener.accept()?;
+            let handler = Arc::clone(&self.handler);
+
+            thread::spawn(move || {
+                let _ = Self::serve_stream_with_handler(handler, stream);
+            });
         }
     }
 
@@ -97,11 +104,36 @@ where
     }
 
     fn serve_stream(&self, stream: &mut UnixStream) -> io::Result<()> {
+        Self::serve_stream_with_handler(Arc::clone(&self.handler), stream.try_clone()?)
+    }
+
+    #[cfg(test)]
+    pub fn serve_count(&self, count: usize) -> io::Result<()> {
+        let mut threads = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let (stream, _) = self.listener.accept()?;
+            let handler = Arc::clone(&self.handler);
+            threads.push(thread::spawn(move || {
+                Self::serve_stream_with_handler(handler, stream)
+            }));
+        }
+
+        for thread in threads {
+            thread
+                .join()
+                .map_err(|_| io::Error::other("daemon connection worker panicked"))??;
+        }
+
+        Ok(())
+    }
+
+    fn serve_stream_with_handler(handler: Arc<H>, mut stream: UnixStream) -> io::Result<()> {
         let mut request_bytes = Vec::new();
         stream.read_to_end(&mut request_bytes)?;
 
         let response = match decode_request(&request_bytes) {
-            Ok(request) => self.handler.handle(request),
+            Ok(request) => handler.handle(request),
             Err(error) => DaemonResponse::Error {
                 message: error.to_string(),
             },

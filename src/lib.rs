@@ -2085,6 +2085,86 @@ mod tests {
     }
 
     #[test]
+    fn live_daemon_busy_port_failures_do_not_fall_back_locally() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let mut transport_factory = FakeTransportFactory::default();
+        transport_factory.fail_next_open(TransportError::open("Device or resource busy"));
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                transport_factory,
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap_err();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon execution failed: transport open failed: Device or resource busy"
+        );
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_disconnect_does_not_fall_back_locally() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server_thread = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+        });
+
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap_err();
+
+        server_thread.join().unwrap();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("invalid daemon protocol message")
+                || message.contains("daemon I/O failed")
+        );
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
     fn device_info_defaults_to_broadcast_and_opens_the_selected_transport() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],
