@@ -1,3 +1,4 @@
+pub mod command_model;
 pub mod device;
 mod error;
 pub mod protocol;
@@ -13,6 +14,7 @@ use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
+use crate::command_model::{CommandRequest, DeviceRequest, RuntimeRequest, ScreenRequest};
 use crate::device::{
     discover_supported_devices, select_device, DeviceDiscovery, DiscoveredDevice,
     SystemDeviceDiscovery,
@@ -268,10 +270,24 @@ where
     Cli::try_parse_from(args)
 }
 
+pub fn try_parse_command_request_from<I, T>(
+    args: I,
+) -> std::result::Result<CommandRequest, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    try_parse_from(args).map(CommandRequest::from)
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     let discovery = SystemDeviceDiscovery;
     let mut transport_factory = SystemTransportFactory;
-    let output = execute_cli(cli, &discovery, &mut transport_factory)?;
+    let output = execute_command_request(
+        CommandRequest::from(cli),
+        &discovery,
+        &mut transport_factory,
+    )?;
     print!("{output}");
     Ok(())
 }
@@ -296,41 +312,54 @@ pub fn main() -> ExitCode {
     }
 }
 
+#[cfg(test)]
 fn execute_cli<D, F>(cli: Cli, discovery: &D, transport_factory: &mut F) -> Result<String>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
 {
-    match cli.command {
-        TopLevelCommand::Device(args) => match args.command {
-            DeviceCommand::List => render_device_list(discovery),
-            DeviceCommand::Info { target } => {
+    execute_command_request(CommandRequest::from(cli), discovery, transport_factory)
+}
+
+fn execute_command_request<D, F>(
+    request: CommandRequest,
+    discovery: &D,
+    transport_factory: &mut F,
+) -> Result<String>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    match request {
+        CommandRequest::Device(command) => match command {
+            DeviceRequest::List => render_device_list(discovery),
+            DeviceRequest::Info { target } => {
                 render_device_info(discovery, transport_factory, &target)
             }
         },
-        TopLevelCommand::Runtime(args) => match args.command {
-            RuntimeCommand::List => execute_runtime_list(),
-            RuntimeCommand::Install { name, target } => {
+        CommandRequest::Runtime(command) => match command {
+            RuntimeRequest::List => execute_runtime_list(),
+            RuntimeRequest::Install { name, target } => {
                 execute_runtime_install(discovery, transport_factory, &name, &target)
             }
-            RuntimeCommand::Verify { target } => {
+            RuntimeRequest::Verify { target } => {
                 execute_runtime_verify(discovery, transport_factory, &target)
             }
-            RuntimeCommand::Upgrade { name, target } => {
+            RuntimeRequest::Upgrade { name, target } => {
                 execute_runtime_upgrade(discovery, transport_factory, &name, &target)
             }
-            RuntimeCommand::Repair { target } => {
+            RuntimeRequest::Repair { target } => {
                 execute_runtime_repair(discovery, transport_factory, &target)
             }
-            RuntimeCommand::Remove { target } => {
+            RuntimeRequest::Remove { target } => {
                 execute_runtime_remove(discovery, transport_factory, &target)
             }
-            RuntimeCommand::Status { target } => {
+            RuntimeRequest::Status { target } => {
                 execute_runtime_status(discovery, transport_factory, &target)
             }
         },
-        TopLevelCommand::Screen(args) => match args.command {
-            ScreenCommand::Set {
+        CommandRequest::Screen(command) => match command {
+            ScreenRequest::Set {
                 assignments,
                 activate,
                 target,
@@ -341,13 +370,13 @@ where
                 &assignments,
                 activate,
             ),
-            ScreenCommand::Clear { layer, target } => {
+            ScreenRequest::Clear { layer, target } => {
                 execute_screen_clear(discovery, transport_factory, &target, &layer)
             }
-            ScreenCommand::Raw { lua, target } => {
+            ScreenRequest::Raw { lua, target } => {
                 execute_screen_raw(discovery, transport_factory, &target, &lua)
             }
-            ScreenCommand::Activate { layer, target } => {
+            ScreenRequest::Activate { layer, target } => {
                 execute_screen_activate(discovery, transport_factory, &target, &layer)
             }
         },
@@ -1393,6 +1422,50 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[test]
+    fn parses_device_list_into_a_local_only_command_request() {
+        let request = try_parse_command_request_from(["vsn1-cli", "device", "list"]).unwrap();
+
+        assert_eq!(request, CommandRequest::Device(DeviceRequest::List));
+        assert!(request.is_local_only());
+    }
+
+    #[test]
+    fn parses_runtime_verify_into_a_daemon_eligible_command_request() {
+        let request = try_parse_command_request_from(["vsn1-cli", "runtime", "verify"]).unwrap();
+
+        assert_eq!(
+            request,
+            CommandRequest::Runtime(RuntimeRequest::Verify {
+                target: TargetArgs::default(),
+            })
+        );
+        assert!(request.is_daemon_eligible());
+    }
+
+    #[test]
+    fn parses_screen_set_into_a_daemon_eligible_command_request() {
+        let request = try_parse_command_request_from([
+            "vsn1-cli",
+            "screen",
+            "set",
+            "persistent.title=Hello",
+            "--activate",
+            "persistent",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            request,
+            CommandRequest::Screen(ScreenRequest::Set {
+                assignments: vec!["persistent.title=Hello".to_string()],
+                activate: Some("persistent".to_string()),
+                target: TargetArgs::default(),
+            })
+        );
+        assert!(request.is_daemon_eligible());
     }
 
     #[test]
