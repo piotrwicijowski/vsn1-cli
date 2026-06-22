@@ -1987,6 +1987,104 @@ mod tests {
     }
 
     #[test]
+    fn live_daemon_device_info_uses_daemon_output_without_local_fallback() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                FakeTransportFactory::default(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Device(DeviceRequest::Info {
+            target: TargetArgs::default(),
+        });
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let direct_discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&direct_discovery, &mut direct_transport_factory);
+        let expected_output =
+            execute_and_render_command(&mut direct_executor, request.clone()).unwrap();
+
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let daemon_output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(daemon_output, expected_output);
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_runtime_status_uses_daemon_output_without_local_fallback() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                FakeTransportFactory::default(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Runtime(RuntimeRequest::Status {
+            target: TargetArgs::default(),
+        });
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let direct_discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&direct_discovery, &mut direct_transport_factory);
+        let expected_output =
+            execute_and_render_command(&mut direct_executor, request.clone()).unwrap();
+
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let daemon_output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(daemon_output, expected_output);
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
     fn device_info_defaults_to_broadcast_and_opens_the_selected_transport() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],

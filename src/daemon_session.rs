@@ -9,6 +9,19 @@ pub const DEVICE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type WorkerResult<T> = std::result::Result<T, TransportError>;
 
+trait DeviceWorkerOperation<T>: Send {
+    fn run(self: Box<Self>, transport: &mut T) -> WorkerResult<()>;
+}
+
+impl<T, F> DeviceWorkerOperation<T> for F
+where
+    F: FnOnce(&mut T) -> WorkerResult<()> + Send + 'static,
+{
+    fn run(self: Box<Self>, transport: &mut T) -> WorkerResult<()> {
+        (*self)(transport)
+    }
+}
+
 pub struct DeviceSessionRegistry<F>
 where
     F: SerialTransportFactory + Send + 'static,
@@ -50,6 +63,10 @@ enum DeviceWorkerCommand {
     },
     WriteImmediate {
         packet: Vec<u8>,
+        reply: mpsc::Sender<WorkerResult<()>>,
+    },
+    RunOperation {
+        operation: Box<dyn DeviceWorkerOperation<Box<dyn SerialTransport + Send>>>,
         reply: mpsc::Sender<WorkerResult<()>>,
     },
 }
@@ -103,6 +120,44 @@ where
             .map_err(|_| worker_disconnected_error(()))?
     }
 
+    pub fn with_transport<R, E, O>(
+        &self,
+        port_name: &str,
+        baud_rate: u32,
+        operation: O,
+    ) -> std::result::Result<R, E>
+    where
+        R: Send + 'static,
+        E: From<TransportError> + Send + 'static,
+        O: FnOnce(&mut dyn SerialTransport) -> std::result::Result<R, E> + Send + 'static,
+    {
+        let (result_sender, result_receiver) = mpsc::channel();
+        let (reply_sender, reply_receiver) = mpsc::channel();
+
+        let wrapped_operation = move |transport: &mut Box<dyn SerialTransport + Send>| {
+            let result = operation(transport.as_mut());
+            let _ = result_sender.send(result);
+            Ok(())
+        };
+
+        self.worker_handle(port_name, baud_rate)
+            .sender
+            .send(DeviceWorkerCommand::RunOperation {
+                operation: Box::new(wrapped_operation),
+                reply: reply_sender,
+            })
+            .map_err(worker_disconnected_error)?;
+
+        reply_receiver
+            .recv()
+            .map_err(|_| E::from(worker_disconnected_error(())))?
+            .map_err(E::from)?;
+
+        result_receiver
+            .recv()
+            .map_err(|_| E::from(worker_disconnected_error(())))?
+    }
+
     fn worker_handle(&self, port_name: &str, baud_rate: u32) -> DeviceWorkerHandle {
         let mut workers = self.inner.workers.lock().unwrap();
         workers
@@ -132,7 +187,7 @@ where
     let (sender, receiver) = mpsc::channel();
 
     thread::spawn(move || {
-        let mut transport = None;
+        let mut transport: Option<Box<dyn SerialTransport + Send>> = None;
 
         loop {
             let command = if transport.is_some() {
@@ -167,17 +222,18 @@ where
 }
 
 fn ensure_transport<F>(
-    transport: &mut Option<F::Transport>,
+    transport: &mut Option<Box<dyn SerialTransport + Send>>,
     transport_factory: &Arc<Mutex<F>>,
     port_name: &str,
     baud_rate: u32,
 ) -> WorkerResult<()>
 where
     F: SerialTransportFactory,
+    F::Transport: Send + 'static,
 {
     if transport.is_none() {
         let mut transport_factory = transport_factory.lock().unwrap();
-        *transport = Some(transport_factory.open(port_name, baud_rate)?);
+        *transport = Some(Box::new(transport_factory.open(port_name, baud_rate)?));
     }
 
     Ok(())
@@ -185,11 +241,12 @@ where
 
 fn run_command(
     command: DeviceWorkerCommand,
-    transport: &mut impl SerialTransport,
+    transport: &mut Box<dyn SerialTransport + Send>,
 ) -> WorkerResult<()> {
     match command {
         DeviceWorkerCommand::EnsureOpen { .. } => Ok(()),
         DeviceWorkerCommand::WriteImmediate { packet, .. } => transport.write_immediate(&packet),
+        DeviceWorkerCommand::RunOperation { operation, .. } => operation.run(transport),
     }
 }
 
@@ -197,6 +254,7 @@ fn command_reply(command: &DeviceWorkerCommand) -> &mpsc::Sender<WorkerResult<()
     match command {
         DeviceWorkerCommand::EnsureOpen { reply } => reply,
         DeviceWorkerCommand::WriteImmediate { reply, .. } => reply,
+        DeviceWorkerCommand::RunOperation { reply, .. } => reply,
     }
 }
 

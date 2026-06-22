@@ -362,6 +362,10 @@ where
 
         identity
     }
+
+    pub fn into_inner(self) -> T {
+        self.transport
+    }
 }
 
 impl<T> RuntimeSlotReader for TransportRuntimeSlotReader<T>

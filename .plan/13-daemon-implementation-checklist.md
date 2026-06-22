@@ -21,11 +21,11 @@ Use this checklist for the optional daemon-backed execution follow-up after the 
 
 - Overall status: `in_progress`
 - Last completed step: `step 7`
-- In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 7 added a real screen-capable daemon request handler backed by the per-device session registry, switched daemon_main() to start that handler, and added integration-style daemon-backed screen raw routing and output-parity coverage without local fallback)`
+- In-progress step: `step 8`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 8 added daemon-backed device info and runtime command handling over the per-device session registry, preserved cold-path output parity in integration coverage for device info and runtime status, and kept screen commands on the same daemon-owned transport path)`
 - Last hardware validation: `none for this checklist`
-- Open blockers: `none`
-- Next session start point: `step 8`
+- Open blockers: `step 8 hardware validation still pending for daemon-backed device info plus runtime install/verify/status/remove behavior on a real VSN1 device`
+- Next session start point: `finish step 8 with hardware validation, then continue to step 9`
 
 ## Rules for every step
 
@@ -152,7 +152,7 @@ Update this section as work lands.
 - Step 5: `completed on 2026-06-22 - added src/daemon_client.rs with a real Unix-socket SystemDaemonClient, wired run() through execute_and_render_command_with_optional_daemon(...), kept local-only commands on the cold path, treated missing and stale sockets as fallback-to-local conditions, surfaced live daemon execution/protocol failures as errors, extended the top-level error type with daemon-client failures, and added regression coverage for local-only bypass, no-daemon fallback, stale-socket fallback, and live-daemon routing without local fallback`
 - Step 6: `completed on 2026-06-22 - added src/daemon_session.rs with a reusable per-device session registry backed by one worker thread per device path, lazy transport open, idle-timeout transport drop, reopen-on-next-request behavior, and immediate-write support; added regression coverage proving same-device request serialization, different-device independence, transport reuse within the idle window, and reopen after idle close using a blocking test transport factory`
 - Step 7: `completed on 2026-06-22 - added src/daemon_command_handler.rs with a real screen-command daemon handler that resolves devices, compiles screen set/clear/activate Lua, encodes immediate packets, and writes them through the daemon session registry; upgraded daemon_server.rs to support injected request handlers; switched daemon_main() to run the screen-capable handler over SystemDeviceDiscovery and SystemTransportFactory; added daemon-backed socket round-trip coverage for screen raw plus top-level integration coverage proving execute_and_render_command_with_optional_daemon(...) uses live daemon screen output without local fallback and matches cold-path rendering`
-- Step 8: `pending`
+- Step 8: `in progress on 2026-06-22 - software implementation and automated verification are complete: src/daemon_command_handler.rs now handles daemon-backed device info and runtime verify/install/upgrade/repair/remove/status over the per-device session registry using a borrowed transport adapter around TransportRuntimeSlotReader, added generic with_transport(...) worker execution support in src/daemon_session.rs, and added integration-style daemon parity coverage for live device info and runtime status; real-device validation is still required before closing this step`
 - Step 9: `pending`
 - Step 10: `pending`
 

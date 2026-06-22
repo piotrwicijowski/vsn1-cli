@@ -1,14 +1,20 @@
-use crate::command_model::{CommandRequest, ScreenRequest};
+use crate::command_model::{CommandRequest, DeviceRequest, RuntimeRequest, ScreenRequest};
 use crate::daemon_protocol::{DaemonRequest, DaemonResponse};
-use crate::daemon_server::{DaemonRequestHandler, EXECUTE_NOT_IMPLEMENTED_MESSAGE};
+use crate::daemon_server::DaemonRequestHandler;
 use crate::daemon_session::{DeviceSessionRegistry, DEVICE_IDLE_TIMEOUT};
 use crate::device::{discover_supported_devices, select_device, DeviceDiscovery};
 use crate::protocol::{self, ImmediateWrite, PacketIdentity};
+use crate::runtime::{
+    inspect_installed_runtime, install_runtime_with_bundle_dir, remove_installed_runtime,
+    repair_installed_runtime, upgrade_runtime_with_bundle_dir, verify_installed_runtime,
+    TransportRuntimeSlotReader,
+};
+use crate::runtime_bundle::resolve_runtime;
 use crate::screen::{
     compile_activate_lua, compile_clear_lua, compile_set_lua, ScreenFieldRegistry,
 };
 use crate::targeting::resolve_target;
-use crate::transport::SerialTransportFactory;
+use crate::transport::{SerialTransport, SerialTransportFactory};
 use crate::{CommandSuccess, TargetArgs};
 
 const DAEMON_SCREEN_PACKET_IDENTITY: PacketIdentity = PacketIdentity::new(0, 1);
@@ -81,6 +87,207 @@ where
         }
     }
 
+    fn execute_device_request(&self, command: DeviceRequest) -> crate::Result<String> {
+        match command {
+            DeviceRequest::List => Err(crate::Error::from(
+                crate::daemon_client::DaemonClientError::Protocol(
+                    crate::daemon_protocol::DaemonProtocolError::LocalOnlyCommand,
+                ),
+            )),
+            DeviceRequest::Info { target } => {
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                self.sessions
+                    .ensure_open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+
+                Ok(crate::render_command_success(&CommandSuccess::DeviceInfo {
+                    device: device.to_string(),
+                    target: resolved_target,
+                }))
+            }
+        }
+    }
+
+    fn execute_runtime_request(&self, command: RuntimeRequest) -> crate::Result<String> {
+        match command {
+            RuntimeRequest::List => Err(crate::Error::from(
+                crate::daemon_client::DaemonClientError::Protocol(
+                    crate::daemon_protocol::DaemonProtocolError::LocalOnlyCommand,
+                ),
+            )),
+            RuntimeRequest::Verify { target } => {
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            let report = verify_installed_runtime(resolved_target, &mut reader)?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::RuntimeStatus {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    report: Some(report),
+                                    verified: true,
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
+            RuntimeRequest::Install { name, target } => {
+                let runtime = resolve_runtime(&name)?;
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            let report = install_runtime_with_bundle_dir(
+                                &runtime.path,
+                                resolved_target,
+                                &mut reader,
+                            )?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::RuntimeInstall {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    runtime: Some(runtime.clone()),
+                                    report,
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
+            RuntimeRequest::Upgrade { name, target } => {
+                let runtime = resolve_runtime(&name)?;
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            let report = upgrade_runtime_with_bundle_dir(
+                                &runtime.path,
+                                resolved_target,
+                                &mut reader,
+                            )?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::RuntimeUpgrade {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    runtime: runtime.clone(),
+                                    report,
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
+            RuntimeRequest::Repair { target } => {
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            let report = repair_installed_runtime(resolved_target, &mut reader)?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::RuntimeRepair {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    report,
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
+            RuntimeRequest::Remove { target } => {
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            let report = remove_installed_runtime(resolved_target, &mut reader)?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::RuntimeRemove {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    report,
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
+            RuntimeRequest::Status { target } => {
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            let report = inspect_installed_runtime(resolved_target, &mut reader)?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::RuntimeStatus {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    report,
+                                    verified: false,
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
+        }
+    }
+
     fn execute_screen_lua(
         &self,
         target_args: &TargetArgs,
@@ -116,6 +323,22 @@ where
     fn handle(&self, request: DaemonRequest) -> DaemonResponse {
         match request {
             DaemonRequest::Ping => DaemonResponse::Pong,
+            DaemonRequest::Execute(CommandRequest::Device(command)) => {
+                match self.execute_device_request(command) {
+                    Ok(output) => DaemonResponse::Success { output },
+                    Err(error) => DaemonResponse::Error {
+                        message: error.to_string(),
+                    },
+                }
+            }
+            DaemonRequest::Execute(CommandRequest::Runtime(command)) => {
+                match self.execute_runtime_request(command) {
+                    Ok(output) => DaemonResponse::Success { output },
+                    Err(error) => DaemonResponse::Error {
+                        message: error.to_string(),
+                    },
+                }
+            }
             DaemonRequest::Execute(CommandRequest::Screen(command)) => {
                 match self.execute_screen_request(command) {
                     Ok(output) => DaemonResponse::Success { output },
@@ -124,10 +347,40 @@ where
                     },
                 }
             }
-            DaemonRequest::Execute(_) => DaemonResponse::Error {
-                message: EXECUTE_NOT_IMPLEMENTED_MESSAGE.to_string(),
-            },
         }
+    }
+}
+
+struct BorrowedSerialTransport<'a>(&'a mut dyn SerialTransport);
+
+impl SerialTransport for BorrowedSerialTransport<'_> {
+    fn write_immediate(
+        &mut self,
+        packet: &[u8],
+    ) -> std::result::Result<(), crate::transport::TransportError> {
+        self.0.write_immediate(packet)
+    }
+
+    fn write_config(
+        &mut self,
+        packet: &[u8],
+    ) -> std::result::Result<(), crate::transport::TransportError> {
+        self.0.write_config(packet)
+    }
+
+    fn bytes_to_read(&self) -> std::result::Result<u32, crate::transport::TransportError> {
+        self.0.bytes_to_read()
+    }
+
+    fn read(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> std::result::Result<usize, crate::transport::TransportError> {
+        self.0.read(buffer)
+    }
+
+    fn clear_input(&mut self) -> std::result::Result<(), crate::transport::TransportError> {
+        self.0.clear_input()
     }
 }
 
