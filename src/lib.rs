@@ -2,6 +2,7 @@ pub mod command_model;
 pub mod daemon_client;
 pub mod daemon_protocol;
 pub mod daemon_server;
+pub mod daemon_session;
 pub mod daemon_socket;
 pub mod device;
 mod error;

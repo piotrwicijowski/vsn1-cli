@@ -20,12 +20,12 @@ Use this checklist for the optional daemon-backed execution follow-up after the 
 ## Session handoff state
 
 - Overall status: `in_progress`
-- Last completed step: `step 5`
+- Last completed step: `step 6`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 5 added a system daemon client, optional daemon-first execution for daemon-eligible commands with local-only bypass, missing-socket and stale-socket fallback to the cold path, and explicit no-fallback behavior for live daemon execution failures and protocol errors)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-22 after step 6 added a reusable per-device daemon session registry with worker threads, lazy open, `5s`-compatible configurable idle close behavior, same-device request serialization, different-device independence, and regression coverage for transport reuse, idle close plus reopen, same-device serialization, and cross-device concurrency)`
 - Last hardware validation: `none for this checklist`
 - Open blockers: `none`
-- Next session start point: `step 6`
+- Next session start point: `step 7`
 
 ## Rules for every step
 
@@ -150,7 +150,7 @@ Update this section as work lands.
 - Step 3: `completed on 2026-06-22 - added src/daemon_protocol.rs with versioned DaemonRequest/DaemonResponse JSON encoding and decoding, explicit version-mismatch and local-only-command errors, added src/daemon_socket.rs with VSN1_DAEMON_SOCKET override plus Linux XDG_RUNTIME_DIR and macOS TMPDIR socket-path resolution, and added regression coverage for protocol round trips, mismatch handling, and socket-path resolution`
 - Step 4: `completed on 2026-06-22 - added src/daemon_server.rs with Unix listener bind/accept logic, parent-directory creation, non-socket path protection, one-request/one-response serving, ping health handling, placeholder execute-request error responses, and cleanup-on-drop behavior; added src/bin/vsn1-daemon.rs plus Cargo binary registration and a daemon_main() library entrypoint; added regression coverage for ping round trips, placeholder execute responses, and bind rejection for existing non-socket paths`
 - Step 5: `completed on 2026-06-22 - added src/daemon_client.rs with a real Unix-socket SystemDaemonClient, wired run() through execute_and_render_command_with_optional_daemon(...), kept local-only commands on the cold path, treated missing and stale sockets as fallback-to-local conditions, surfaced live daemon execution/protocol failures as errors, extended the top-level error type with daemon-client failures, and added regression coverage for local-only bypass, no-daemon fallback, stale-socket fallback, and live-daemon routing without local fallback`
-- Step 6: `pending`
+- Step 6: `completed on 2026-06-22 - added src/daemon_session.rs with a reusable per-device session registry backed by one worker thread per device path, lazy transport open, idle-timeout transport drop, reopen-on-next-request behavior, and immediate-write support; added regression coverage proving same-device request serialization, different-device independence, transport reuse within the idle window, and reopen after idle close using a blocking test transport factory`
 - Step 7: `pending`
 - Step 8: `pending`
 - Step 9: `pending`
