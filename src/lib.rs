@@ -5,6 +5,7 @@ pub mod daemon_protocol;
 pub mod daemon_server;
 pub mod daemon_session;
 pub mod daemon_socket;
+mod debug;
 pub mod device;
 mod error;
 pub mod protocol;
@@ -71,8 +72,22 @@ const SCREEN_ACTIVATE_AFTER_HELP: &str =
     arg_required_else_help = true
 )]
 pub struct Cli {
+    #[arg(long, global = true, help = "Enable debug logging to stderr")]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub command: TopLevelCommand,
+}
+
+#[derive(Debug, Parser, PartialEq, Eq)]
+#[command(
+    name = "vsn1-daemon",
+    version,
+    about = "Host-local daemon for VSN1 CLI command forwarding"
+)]
+pub struct DaemonCli {
+    #[arg(long, global = true, help = "Enable debug logging to stderr")]
+    pub debug: bool,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -349,6 +364,10 @@ pub fn command() -> clap::Command {
     Cli::command()
 }
 
+pub fn daemon_command() -> clap::Command {
+    DaemonCli::command()
+}
+
 pub fn try_parse_from<I, T>(args: I) -> std::result::Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -367,7 +386,16 @@ where
     try_parse_from(args).map(CommandRequest::from)
 }
 
+pub fn try_parse_daemon_from<I, T>(args: I) -> std::result::Result<DaemonCli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    DaemonCli::try_parse_from(args)
+}
+
 pub fn run(cli: Cli) -> Result<()> {
+    debug::set_debug_enabled(cli.debug);
     let discovery = SystemDeviceDiscovery;
     let mut transport_factory = SystemTransportFactory;
     let mut executor = OneShotCommandExecutor::new(&discovery, &mut transport_factory);
@@ -402,6 +430,19 @@ pub fn main() -> ExitCode {
 }
 
 pub fn daemon_main() -> ExitCode {
+    let daemon_cli = match try_parse_daemon_from(std::env::args_os()) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = error.exit_code();
+            let _ = error.print();
+
+            return u8::try_from(exit_code)
+                .map(ExitCode::from)
+                .unwrap_or(ExitCode::FAILURE);
+        }
+    };
+
+    debug::set_debug_enabled(daemon_cli.debug);
     let socket_path = match daemon_socket::resolve_daemon_socket_path() {
         Ok(path) => path,
         Err(error) => {
@@ -409,6 +450,10 @@ pub fn daemon_main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    debug::log(
+        "daemon",
+        format!("starting daemon on {}", socket_path.display()),
+    );
 
     let server = match daemon_server::DaemonServer::bind_with_handler(
         &socket_path,
@@ -447,11 +492,30 @@ pub fn execute_and_render_command_with_optional_daemon(
     request: CommandRequest,
 ) -> Result<String> {
     if request.is_daemon_eligible() {
+        debug::log("cli", format!("trying daemon for {}", request.debug_name()));
         if let Some(output) = daemon_client.try_execute(&request)? {
+            debug::log("cli", format!("daemon handled {}", request.debug_name()));
             return Ok(output);
         }
+
+        debug::log(
+            "cli",
+            format!(
+                "daemon unavailable for {}; using cold path",
+                request.debug_name()
+            ),
+        );
+    } else {
+        debug::log(
+            "cli",
+            format!("{} is local-only; bypassing daemon", request.debug_name()),
+        );
     }
 
+    debug::log(
+        "cli",
+        format!("executing cold path for {}", request.debug_name()),
+    );
     execute_and_render_command(executor, request)
 }
 
@@ -1476,6 +1540,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::List,
                 }),
@@ -1490,6 +1555,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs {
@@ -1517,6 +1583,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs {
@@ -1537,6 +1604,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Verify {
                         target: TargetArgs::default(),
@@ -1553,6 +1621,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::List,
                 }),
@@ -1567,6 +1636,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Install {
                         name: "default".to_string(),
@@ -1587,6 +1657,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Upgrade {
                         name: "default".to_string(),
@@ -1621,6 +1692,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Set {
                         assignments: vec![
@@ -1646,6 +1718,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Clear {
                         layer: "fast".to_string(),
@@ -1663,6 +1736,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Activate {
                         layer: "persistent".to_string(),
@@ -1686,6 +1760,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "return update_param('persistent.title', 'Hello')".to_string(),
@@ -1704,6 +1779,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Set {
                         assignments: vec!["persistent.title=left=right".to_string()],
@@ -1721,6 +1797,26 @@ mod tests {
 
         assert_eq!(request, CommandRequest::Device(DeviceRequest::List));
         assert!(request.is_local_only());
+    }
+
+    #[test]
+    fn parses_top_level_debug_flag() {
+        let cli = try_parse_from(["vsn1-cli", "--debug", "device", "list"]).unwrap();
+
+        assert!(cli.debug);
+        assert_eq!(
+            cli.command,
+            TopLevelCommand::Device(DeviceArgs {
+                command: DeviceCommand::List,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_daemon_debug_flag() {
+        let cli = try_parse_daemon_from(["vsn1-daemon", "--debug"]).unwrap();
+
+        assert!(cli.debug);
     }
 
     #[test]
@@ -2174,6 +2270,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs::default(),
@@ -2205,6 +2302,7 @@ mod tests {
 
         let error = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs::default(),
@@ -2232,6 +2330,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs {
@@ -2270,6 +2369,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs::default(),
@@ -2299,6 +2399,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Remove {
                         target: TargetArgs {
@@ -2320,6 +2421,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Remove {
                         target: TargetArgs {
@@ -2343,6 +2445,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "return 1".to_string(),
@@ -2381,6 +2484,7 @@ mod tests {
     fn screen_raw_surfaces_targeting_errors() {
         let error = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "return 1".to_string(),
@@ -2416,6 +2520,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "snowman = '☃'".to_string(),

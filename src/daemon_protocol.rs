@@ -42,12 +42,29 @@ struct VersionedDaemonResponse {
 pub type Result<T> = std::result::Result<T, DaemonProtocolError>;
 
 impl DaemonRequest {
+    pub fn debug_name(&self) -> &'static str {
+        match self {
+            Self::Ping => "ping",
+            Self::Execute(command) => command.debug_name(),
+        }
+    }
+
     pub fn for_command(command: CommandRequest) -> Result<Self> {
         if command.is_local_only() {
             return Err(DaemonProtocolError::LocalOnlyCommand);
         }
 
         Ok(Self::Execute(command))
+    }
+}
+
+impl DaemonResponse {
+    pub fn debug_name(&self) -> &'static str {
+        match self {
+            Self::Pong => "pong",
+            Self::Success { .. } => "success",
+            Self::Error { .. } => "error",
+        }
     }
 }
 

@@ -9,6 +9,7 @@ use crate::daemon_protocol::{
     decode_response, encode_request, DaemonProtocolError, DaemonRequest, DaemonResponse,
 };
 use crate::daemon_socket::{self, DaemonSocketPathError};
+use crate::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonClientError {
@@ -75,6 +76,10 @@ impl From<DaemonProtocolError> for DaemonClientError {
 impl DaemonCommandClient for SystemDaemonClient {
     fn try_execute(&mut self, request: &CommandRequest) -> Result<Option<String>> {
         let request = DaemonRequest::for_command(request.clone())?;
+        debug::log(
+            "daemon-client",
+            format!("prepared {} request", request.debug_name()),
+        );
 
         let socket_path = match self.resolve_socket_path() {
             Ok(Some(path)) => path,
@@ -82,6 +87,10 @@ impl DaemonCommandClient for SystemDaemonClient {
             Err(DaemonSocketPathError::MissingEnvironment { .. })
             | Err(DaemonSocketPathError::UnsupportedPlatform { .. }) => return Ok(None),
         };
+        debug::log(
+            "daemon-client",
+            format!("connecting to {}", socket_path.display()),
+        );
 
         let mut stream = match UnixStream::connect(&socket_path) {
             Ok(stream) => stream,
@@ -91,9 +100,17 @@ impl DaemonCommandClient for SystemDaemonClient {
                     io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
                 ) =>
             {
+                debug::log(
+                    "daemon-client",
+                    format!(
+                        "socket unavailable at {}; falling back",
+                        socket_path.display()
+                    ),
+                );
                 return Ok(None);
             }
             Err(error) => {
+                debug::log("daemon-client", format!("daemon connect failed: {}", error));
                 return Err(DaemonClientError::Io {
                     message: error.to_string(),
                 });
@@ -120,8 +137,24 @@ impl DaemonCommandClient for SystemDaemonClient {
             })?;
 
         match decode_response(&response_bytes)? {
-            DaemonResponse::Success { output } => Ok(Some(output)),
-            DaemonResponse::Error { message } => Err(DaemonClientError::Execution { message }),
+            DaemonResponse::Success { output } => {
+                debug::log(
+                    "daemon-client",
+                    format!("daemon returned success for {}", request.debug_name()),
+                );
+                Ok(Some(output))
+            }
+            DaemonResponse::Error { message } => {
+                debug::log(
+                    "daemon-client",
+                    format!(
+                        "daemon returned execution error for {}: {}",
+                        request.debug_name(),
+                        message
+                    ),
+                );
+                Err(DaemonClientError::Execution { message })
+            }
             DaemonResponse::Pong => Err(DaemonClientError::Protocol(
                 DaemonProtocolError::InvalidMessage {
                     message: "daemon returned Pong to an Execute request".to_string(),

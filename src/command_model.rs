@@ -57,6 +57,24 @@ pub enum ScreenRequest {
 }
 
 impl CommandRequest {
+    pub fn debug_name(&self) -> &'static str {
+        match self {
+            Self::Device(DeviceRequest::List) => "device list",
+            Self::Device(DeviceRequest::Info { .. }) => "device info",
+            Self::Runtime(RuntimeRequest::List) => "runtime list",
+            Self::Runtime(RuntimeRequest::Install { .. }) => "runtime install",
+            Self::Runtime(RuntimeRequest::Verify { .. }) => "runtime verify",
+            Self::Runtime(RuntimeRequest::Upgrade { .. }) => "runtime upgrade",
+            Self::Runtime(RuntimeRequest::Repair { .. }) => "runtime repair",
+            Self::Runtime(RuntimeRequest::Remove { .. }) => "runtime remove",
+            Self::Runtime(RuntimeRequest::Status { .. }) => "runtime status",
+            Self::Screen(ScreenRequest::Set { .. }) => "screen set",
+            Self::Screen(ScreenRequest::Clear { .. }) => "screen clear",
+            Self::Screen(ScreenRequest::Raw { .. }) => "screen raw",
+            Self::Screen(ScreenRequest::Activate { .. }) => "screen activate",
+        }
+    }
+
     pub fn routing(&self) -> CommandRouting {
         match self {
             Self::Device(DeviceRequest::List) | Self::Runtime(RuntimeRequest::List) => {

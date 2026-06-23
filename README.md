@@ -55,6 +55,13 @@ Show help from the dev checkout without installing:
 cargo run -- --help
 ```
 
+Enable debug logging to stderr:
+
+```bash
+cargo run -- --debug device list
+cargo run --bin vsn1-daemon -- --debug
+```
+
 ## Device Commands
 
 List supported USB serial devices:
@@ -239,6 +246,8 @@ Run the daemon directly from a checkout:
 ```bash
 cargo run --bin vsn1-daemon
 ```
+
+Add `--debug` to either binary to log daemon connection attempts, fallback decisions, accepted daemon requests, and handler outcomes to stderr.
 
 Example service files are checked in at:
 

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::daemon_protocol::{decode_request, encode_response, DaemonRequest, DaemonResponse};
+use crate::debug;
 
 pub const EXECUTE_NOT_IMPLEMENTED_MESSAGE: &str =
     "daemon command execution path is not implemented yet";
@@ -75,6 +76,7 @@ where
         }
 
         let listener = UnixListener::bind(socket_path)?;
+        debug::log("daemon", format!("bound socket {}", socket_path.display()));
 
         Ok(Self {
             listener,
@@ -91,6 +93,7 @@ where
         loop {
             let (stream, _) = self.listener.accept()?;
             let handler = Arc::clone(&self.handler);
+            debug::log("daemon", "accepted client connection");
 
             thread::spawn(move || {
                 let _ = Self::serve_stream_with_handler(handler, stream);
@@ -133,7 +136,15 @@ where
         stream.read_to_end(&mut request_bytes)?;
 
         let response = match decode_request(&request_bytes) {
-            Ok(request) => handler.handle(request),
+            Ok(request) => {
+                debug::log("daemon", format!("handling {}", request.debug_name()));
+                let response = handler.handle(request);
+                debug::log(
+                    "daemon",
+                    format!("returning {} response", response.debug_name()),
+                );
+                response
+            }
             Err(error) => DaemonResponse::Error {
                 message: error.to_string(),
             },

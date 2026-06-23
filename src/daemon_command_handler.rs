@@ -2,6 +2,7 @@ use crate::command_model::{CommandRequest, DeviceRequest, RuntimeRequest, Screen
 use crate::daemon_protocol::{DaemonRequest, DaemonResponse};
 use crate::daemon_server::DaemonRequestHandler;
 use crate::daemon_session::{DeviceSessionRegistry, DEVICE_IDLE_TIMEOUT};
+use crate::debug;
 use crate::device::{discover_supported_devices, select_device, DeviceDiscovery};
 use crate::protocol::{self, ImmediateWrite, PacketIdentity};
 use crate::runtime::{
@@ -51,6 +52,7 @@ where
     }
 
     fn execute_screen_request(&self, command: ScreenRequest) -> crate::Result<String> {
+        debug::log("daemon-handler", "executing screen command");
         match command {
             ScreenRequest::Raw { lua, target } => {
                 self.execute_screen_lua(&target, &lua, "raw screen update")
@@ -88,6 +90,7 @@ where
     }
 
     fn execute_device_request(&self, command: DeviceRequest) -> crate::Result<String> {
+        debug::log("daemon-handler", "executing device command");
         match command {
             DeviceRequest::List => Err(crate::Error::from(
                 crate::daemon_client::DaemonClientError::Protocol(
@@ -109,6 +112,7 @@ where
     }
 
     fn execute_runtime_request(&self, command: RuntimeRequest) -> crate::Result<String> {
+        debug::log("daemon-handler", "executing runtime command");
         match command {
             RuntimeRequest::List => Err(crate::Error::from(
                 crate::daemon_client::DaemonClientError::Protocol(
