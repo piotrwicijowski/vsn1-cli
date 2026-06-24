@@ -150,33 +150,39 @@ impl fmt::Display for ProtocolError {
 
 impl StdError for ProtocolError {}
 
-pub fn frame_lua(lua: &str) -> String {
+fn normalize_lua_body(lua: &str) -> String {
     let trimmed = lua.trim();
 
-    let normalize_body = |body: &str| {
-        let body = body.trim();
-
-        if body.starts_with(GRID_LUA_CALLBACK_PREFIX) {
-            body.to_string()
-        } else if body.is_empty() {
-            GRID_LUA_CALLBACK_PREFIX.to_string()
-        } else {
-            format!("{GRID_LUA_CALLBACK_PREFIX} {body}")
-        }
-    };
-
-    if let Some(inner) = trimmed
+    let body = if let Some(inner) = trimmed
         .strip_prefix("<?lua")
         .and_then(|inner| inner.strip_suffix("?>"))
     {
-        return format!("<?lua {} ?>", normalize_body(inner));
-    }
+        inner
+    } else {
+        trimmed
+    };
 
-    format!("<?lua {} ?>", normalize_body(trimmed))
+    let body = body.trim();
+
+    if body.starts_with(GRID_LUA_CALLBACK_PREFIX) {
+        body.to_string()
+    } else if body.is_empty() {
+        GRID_LUA_CALLBACK_PREFIX.to_string()
+    } else {
+        format!("{GRID_LUA_CALLBACK_PREFIX} {body}")
+    }
+}
+
+pub fn frame_lua(lua: &str) -> String {
+    format!("<?lua {} ?>", normalize_lua_body(lua))
+}
+
+pub fn frame_immediate_lua(lua: &str) -> String {
+    normalize_lua_body(lua)
 }
 
 pub fn encode_immediate_packet(write: &ImmediateWrite<'_>) -> Result<Vec<u8>> {
-    let framed_lua = frame_lua(write.lua);
+    let framed_lua = frame_immediate_lua(write.lua);
     let script_bytes = encode_script_bytes(&framed_lua)?;
 
     let mut class = vec![GRID_CONST_STX];
@@ -364,7 +370,20 @@ mod tests {
     }
 
     #[test]
-    fn encodes_immediate_packet_with_framed_payload() {
+    fn normalizes_immediate_lua_without_outer_wrapper() {
+        assert_eq!(frame_immediate_lua("  return 1\n"), "--[[@cb]] return 1");
+    }
+
+    #[test]
+    fn strips_outer_wrapper_from_existing_immediate_lua_frame() {
+        assert_eq!(
+            frame_immediate_lua(" <?lua   return 1   ?> "),
+            "--[[@cb]] return 1"
+        );
+    }
+
+    #[test]
+    fn encodes_immediate_packet_with_unwrapped_payload() {
         let packet = encode_immediate_packet(&ImmediateWrite {
             target: GridTarget::BROADCAST,
             lua: "test",
@@ -373,10 +392,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(&packet[0..2], &[GRID_CONST_SOH, GRID_CONST_BRC]);
-        assert_eq!(&packet[2..6], b"0039");
         assert_eq!(&packet[23..28], b"\x02085e");
-        assert_eq!(&packet[28..32], b"0017");
-        assert_eq!(immediate_payload(&packet), b"<?lua --[[@cb]] test ?>");
+        assert_eq!(immediate_payload(&packet), b"--[[@cb]] test");
+        assert_eq!(
+            std::str::from_utf8(&packet[2..6]).unwrap(),
+            format!("{:04x}", packet.len() - 3)
+        );
+        assert_eq!(
+            std::str::from_utf8(&packet[28..32]).unwrap(),
+            format!("{:04x}", immediate_payload(&packet).len())
+        );
         assert!(packet_has_valid_checksum(&packet));
         assert_eq!(packet.last(), Some(&GRID_CONST_LF));
     }
@@ -410,10 +435,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(
-            immediate_payload(&packet),
-            b"<?lua --[[@cb]] snowman = '' ?>"
-        );
+        assert_eq!(immediate_payload(&packet), b"--[[@cb]] snowman = ''");
     }
 
     #[test]

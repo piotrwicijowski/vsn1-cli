@@ -240,7 +240,7 @@ pub enum ScreenCommand {
     Raw {
         #[arg(
             value_name = "LUA",
-            help = "Raw Lua snippet to frame and send over the immediate path"
+            help = "Raw Lua snippet to normalize and send over the immediate path"
         )]
         lua: String,
         #[command(flatten)]
@@ -2474,10 +2474,7 @@ mod tests {
         let writes = transport_factory.immediate_writes();
         let packet = &writes[0];
         assert_eq!(&packet[14..18], b"8081");
-        assert_eq!(
-            &packet[32..packet.len() - 5],
-            b"<?lua --[[@cb]] return 1 ?>"
-        );
+        assert_eq!(&packet[32..packet.len() - 5], b"--[[@cb]] return 1");
     }
 
     #[test]
@@ -2538,10 +2535,7 @@ mod tests {
 
         let writes = transport_factory.immediate_writes();
         let packet = &writes[0];
-        assert_eq!(
-            &packet[32..packet.len() - 5],
-            b"<?lua --[[@cb]] snowman = '' ?>"
-        );
+        assert_eq!(&packet[32..packet.len() - 5], b"--[[@cb]] snowman = ''");
     }
 
     #[test]

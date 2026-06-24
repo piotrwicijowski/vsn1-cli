@@ -22,7 +22,7 @@ pub fn send_screen_raw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::frame_lua;
+    use crate::protocol::frame_immediate_lua;
     use crate::transport::{FakeTransport, TransportError};
 
     #[test]
@@ -37,7 +37,7 @@ mod tests {
         let packet = &transport.immediate_writes()[0];
         let payload = &packet[32..packet.len() - 5];
 
-        assert_eq!(payload, frame_lua(" return 1 ").as_bytes());
+        assert_eq!(payload, frame_immediate_lua(" return 1 ").as_bytes());
         assert_eq!(&packet[14..18], b"8081");
     }
 
@@ -50,7 +50,7 @@ mod tests {
         let packet = &transport.immediate_writes()[0];
         let payload = &packet[32..packet.len() - 5];
 
-        assert_eq!(payload, b"<?lua --[[@cb]] snowman = '' ?>");
+        assert_eq!(payload, b"--[[@cb]] snowman = ''");
     }
 
     #[test]
