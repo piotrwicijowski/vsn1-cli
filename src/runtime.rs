@@ -1044,7 +1044,7 @@ fn verify_removed_slots<R>(
 where
     R: RuntimeSlotReader,
 {
-    let cleared_slot_sha256 = normalized_sha256(&protocol::frame_lua(""));
+    let cleared_slot_sha256 = normalized_sha256(&expected_config_slot_readback(""));
 
     for slot in removed_slots {
         if let Some(read) = reader.read_owned_slot(requested_target, slot)? {
@@ -1060,7 +1060,7 @@ where
                 }
             }
 
-            if normalized_sha256(&read.content) == cleared_slot_sha256 {
+            if normalized_sha256(&normalize_text_content(&read.content)) == cleared_slot_sha256 {
                 continue;
             }
 
@@ -1103,7 +1103,11 @@ where
                         }
                     }
                     _ => {
-                        if normalize_text_content(&read.content) == asset.stored_content {
+                        let actual_content = normalize_text_content(&read.content);
+                        let expected_content =
+                            expected_config_slot_readback(&asset.normalized_content);
+
+                        if actual_content == expected_content {
                             RuntimeSlotStatus::Match {
                                 source_target: read.source_target,
                             }
@@ -1372,6 +1376,10 @@ fn parse_ascii_text_range(frame: &[u8], offset: usize, width: usize) -> String {
     String::from_utf8_lossy(slice).into_owned()
 }
 
+fn expected_config_slot_readback(content: &str) -> String {
+    normalize_text_content(&protocol::frame_immediate_lua(content))
+}
+
 fn push_unique_target(targets: &mut Vec<GridTarget>, target: GridTarget) {
     if !targets.iter().any(|existing| existing == &target) {
         targets.push(target);
@@ -1502,12 +1510,12 @@ mod tests {
                     ResolvedTarget::Explicit(target) => target,
                 };
                 let content = if self.drifted_slot.as_deref() == Some(asset.slot.name.as_str()) {
-                    normalize_text_content(&frame_lua(&format!(
+                    expected_config_slot_readback(&format!(
                         "{}\n-- drifted after install\n",
                         asset.slot.name
-                    )))
+                    ))
                 } else {
-                    asset.stored_content.clone()
+                    expected_config_slot_readback(&asset.normalized_content)
                 };
 
                 self.slots.insert(
@@ -1548,7 +1556,7 @@ mod tests {
                 slot.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
-                    content: normalize_text_content(&frame_lua("")),
+                    content: expected_config_slot_readback(""),
                 },
             );
             Ok(())
@@ -1608,7 +1616,7 @@ install_order = 20
             reader.insert(
                 &asset.slot,
                 GridTarget::new(0, 0),
-                asset.stored_content.clone(),
+                expected_config_slot_readback(&asset.normalized_content),
             );
         }
 
@@ -1632,9 +1640,9 @@ install_order = 20
 
         for asset in bundle.assets() {
             let content = if asset.slot.name == "lcd-draw" {
-                normalize_text_content(&frame_lua("return 'drifted'\n"))
+                expected_config_slot_readback("return 'drifted'\n")
             } else {
-                asset.stored_content.clone()
+                expected_config_slot_readback(&asset.normalized_content)
             };
 
             reader.insert(&asset.slot, GridTarget::new(0, 0), content);
@@ -1690,7 +1698,7 @@ install_order = 20
             reader.insert(
                 &asset.slot,
                 GridTarget::new(0, 0),
-                asset.stored_content.clone(),
+                expected_config_slot_readback(&asset.normalized_content),
             );
         }
 
@@ -1714,7 +1722,7 @@ install_order = 20
         reader.insert(
             &init_asset.slot,
             GridTarget::new(0, 0),
-            init_asset.stored_content.clone(),
+            expected_config_slot_readback(&init_asset.normalized_content),
         );
 
         let report =
@@ -1840,7 +1848,7 @@ install_order = 10
         assert_eq!(backup_bundle.assets()[0].slot.name, "first");
         assert_eq!(
             backup_bundle.assets()[0].stored_content,
-            normalize_text_content(&frame_lua("return 'pre-first'\n"))
+            expected_config_slot_readback("return 'pre-first'\n")
         );
         assert_eq!(backup_bundle.assets()[1].slot.name, "second");
         assert_eq!(backup_bundle.assets()[1].normalized_content, "");
@@ -1917,7 +1925,7 @@ install_order = 10
                 asset.slot.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
-                    content: asset.stored_content.clone(),
+                    content: expected_config_slot_readback(&asset.normalized_content),
                 },
             );
         }
@@ -1983,7 +1991,7 @@ install_order = 10
 
         for asset in bundle.assets() {
             let content = if asset.slot.name == "lcd-init" {
-                normalize_text_content(&frame_lua("return 'drifted'\n"))
+                expected_config_slot_readback("return 'drifted'\n")
             } else {
                 String::new()
             };
@@ -2094,7 +2102,7 @@ install_order = 10
                 asset.slot.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
-                    content: asset.stored_content.clone(),
+                    content: expected_config_slot_readback(&asset.normalized_content),
                 },
             );
         }
@@ -2120,9 +2128,10 @@ install_order = 10
         assert!(report.restored_from_backup());
         assert_eq!(report.warning(), None);
         assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
-        assert!(accessor.slots.values().any(
-            |slot| slot.content == normalize_text_content(&frame_lua("return 'backup draw'\n"))
-        ));
+        assert!(accessor
+            .slots
+            .values()
+            .any(|slot| slot.content == expected_config_slot_readback("return 'backup draw'\n")));
     }
 
     #[test]
@@ -2140,7 +2149,7 @@ install_order = 10
                 asset.slot.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
-                    content: asset.stored_content.clone(),
+                    content: expected_config_slot_readback(&asset.normalized_content),
                 },
             );
         }
@@ -2170,6 +2179,7 @@ install_order = 10
         assert!(accessor
             .slots
             .values()
-            .all(|slot| normalized_sha256(&slot.content) == normalized_sha256(&frame_lua(""))));
+            .all(|slot| normalized_sha256(&slot.content)
+                == normalized_sha256(&expected_config_slot_readback(""))));
     }
 }

@@ -197,7 +197,7 @@ pub fn encode_immediate_packet(write: &ImmediateWrite<'_>) -> Result<Vec<u8>> {
 }
 
 pub fn encode_config_packet(write: &ConfigWrite<'_>) -> Result<Vec<u8>> {
-    let framed_lua = frame_lua(write.lua);
+    let framed_lua = frame_immediate_lua(write.lua);
     let script_bytes = encode_script_bytes(&framed_lua)?;
 
     let mut class = vec![GRID_CONST_STX];
@@ -416,13 +416,19 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(&packet[2..6], b"0049");
         assert_eq!(&packet[14..18], b"7f80");
         assert_eq!(&packet[23..28], b"\x02060e");
         assert_eq!(&packet[28..34], b"010501");
         assert_eq!(&packet[34..40], b"ff0d08");
-        assert_eq!(&packet[40..44], b"001b");
-        assert_eq!(config_payload(&packet), b"<?lua --[[@cb]] return 1 ?>");
+        assert_eq!(config_payload(&packet), b"--[[@cb]] return 1");
+        assert_eq!(
+            std::str::from_utf8(&packet[2..6]).unwrap(),
+            format!("{:04x}", packet.len() - 3)
+        );
+        assert_eq!(
+            std::str::from_utf8(&packet[40..44]).unwrap(),
+            format!("{:04x}", config_payload(&packet).len())
+        );
         assert!(packet_has_valid_checksum(&packet));
     }
 

@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::protocol::{frame_lua, GRID_MAX_LUA_BYTES};
+use crate::protocol::{frame_immediate_lua, GRID_MAX_LUA_BYTES};
 
 pub const BUNDLED_RUNTIME_NAME: &str = "default";
 
@@ -492,7 +492,7 @@ fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsse
         })?;
     let normalized_content = normalize_text_content(&original_content);
     validate_installable_script_length(&slot, &normalized_content)?;
-    let stored_content = normalize_text_content(&frame_lua(&normalized_content));
+    let stored_content = normalize_text_content(&frame_immediate_lua(&normalized_content));
     let actual_hash = sha256_hex(stored_content.as_bytes());
 
     Ok(RuntimeAsset {
@@ -521,7 +521,7 @@ fn resolve_asset_path(root: &Path, asset: &str) -> Result<PathBuf> {
 }
 
 fn validate_installable_script_length(slot: &OwnedRuntimeSlot, content: &str) -> Result<()> {
-    let framed_len = frame_lua(content).len();
+    let framed_len = frame_immediate_lua(content).len();
     let max_len = GRID_MAX_LUA_BYTES - 1;
 
     if framed_len > max_len {
@@ -626,7 +626,7 @@ install_order = 10
         assert!(draw.normalized_content.contains("for i=1,#z.o do"));
 
         for asset in bundle.assets() {
-            assert!(frame_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
+            assert!(frame_immediate_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
         }
     }
 
@@ -689,7 +689,7 @@ install_order = 10
             .any(|field| field.name == "playback_status.status"));
 
         for asset in bundle.assets() {
-            assert!(frame_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
+            assert!(frame_immediate_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
         }
     }
 
@@ -1147,7 +1147,7 @@ install_order = 10
 
         assert_eq!(
             error.to_string(),
-            "invalid runtime manifest: owned slot lcd-init exceeds the Grid CONFIG payload limit after Lua framing: 928 bytes (maximum 908)"
+            "invalid runtime manifest: owned slot lcd-init exceeds the Grid CONFIG payload limit after Lua framing: 919 bytes (maximum 908)"
         );
     }
 }
