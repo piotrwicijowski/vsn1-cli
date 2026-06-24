@@ -21,11 +21,17 @@ Build from the checkout:
 cargo build
 ```
 
-Install the CLI system-wide with the checked-in runtimes:
+Install for the current host OS, including the matching daemon service definition:
 
 ```bash
-make install
 sudo make install
+```
+
+Explicit platform targets are also available:
+
+```bash
+sudo make install-linux
+sudo make install-macos
 ```
 
 Default install locations:
@@ -33,8 +39,10 @@ Default install locations:
 - binary: `/usr/local/bin/vsn1-cli`
 - daemon: `/usr/local/bin/vsn1-daemon`
 - runtimes: `/usr/share/vsn1-cli/runtimes`
+- Linux user unit: `/usr/lib/systemd/user/vsn1-daemon.service`
+- macOS LaunchAgent: `/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist`
 
-Override paths for packaging or staged installs with `DESTDIR`, `BINDIR`, or `RUNTIME_ROOT`.
+Override paths for packaging or staged installs with `DESTDIR`, `BINDIR`, `RUNTIME_ROOT`, `SYSTEMD_USER_UNITDIR`, or `LAUNCHD_AGENT_DIR`.
 
 Quick verification after install:
 
@@ -251,7 +259,82 @@ Add `--debug` to either binary to log daemon connection attempts, fallback decis
 
 Example service files are checked in at:
 
-- `docs/vsn1-daemon.service`
-- `docs/com.vsn1.vsn1-daemon.plist`
+- `assets/services/vsn1-daemon.service`
+- `assets/services/com.vsn1.vsn1-daemon.plist`
 
-These examples assume `/usr/local/bin/vsn1-daemon`; adjust the binary path to match your install location.
+These examples assume `/usr/local/bin/vsn1-daemon`. If you install the daemon somewhere else, update `ExecStart=` in the systemd unit or `ProgramArguments[0]` in the launchd plist before enabling it.
+
+### systemd --user
+
+Install the binaries, runtimes, and systemd user-unit definition:
+
+```bash
+sudo make install-linux
+```
+
+To install just the unit file, run:
+
+```bash
+sudo make install-systemd-user-service
+```
+
+That target copies `assets/services/vsn1-daemon.service` to `/usr/lib/systemd/user/vsn1-daemon.service` by default.
+
+Enable and start the daemon:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now vsn1-daemon.service
+```
+
+Useful follow-up commands:
+
+```bash
+systemctl --user status vsn1-daemon.service
+journalctl --user -u vsn1-daemon.service -f
+```
+
+Disable and remove the user unit later:
+
+```bash
+systemctl --user disable --now vsn1-daemon.service
+sudo make uninstall-systemd-user-service
+systemctl --user daemon-reload
+```
+
+### launchd
+
+Install the binaries, runtimes, and LaunchAgent definition:
+
+```bash
+sudo make install-macos
+```
+
+To install just the LaunchAgent plist, run:
+
+```bash
+sudo make install-launchd-agent
+```
+
+That target copies `assets/services/com.vsn1.vsn1-daemon.plist` to `/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist` by default.
+
+Load and start the daemon for the current user:
+
+```bash
+sudo launchctl bootstrap "gui/$(id -u)" "/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist"
+sudo launchctl kickstart -k "gui/$(id -u)/com.vsn1.vsn1-daemon"
+```
+
+Useful follow-up commands:
+
+```bash
+launchctl print "gui/$(id -u)/com.vsn1.vsn1-daemon"
+tail -f /tmp/vsn1-daemon.stderr.log
+```
+
+Unload and remove the LaunchAgent later:
+
+```bash
+sudo launchctl bootout "gui/$(id -u)" "/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist"
+sudo make uninstall-launchd-agent
+```
