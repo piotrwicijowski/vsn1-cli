@@ -226,3 +226,5 @@ Update this section as work lands.
 1. For future work to make runtime layers manifest-defined instead of fixed to `persistent`, `slow`, and `fast`, use `10-manifest-defined-runtime-layers-plan.md` as the starting point.
 2. The manifest-defined layer follow-up now assumes one or more persistent layers are valid and that the most recently activated persistent layer should become the active base layer.
 3. The manifest-defined layer follow-up is complete for the shipped default runtime; future hardware coverage for persistent-to-persistent base switching will require a runtime that declares multiple persistent layers.
+4. For future work to add optional daemon-backed command execution with per-device warm-port reuse and `5s` idle close, use `12-daemon-capability-plan.md`.
+5. For step-by-step execution of the daemon follow-up, use `13-daemon-implementation-checklist.md`.

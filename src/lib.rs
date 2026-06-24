@@ -1,3 +1,11 @@
+pub mod command_model;
+pub mod daemon_client;
+pub mod daemon_command_handler;
+pub mod daemon_protocol;
+pub mod daemon_server;
+pub mod daemon_session;
+pub mod daemon_socket;
+mod debug;
 pub mod device;
 mod error;
 pub mod protocol;
@@ -12,7 +20,10 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
+use crate::command_model::{CommandRequest, DeviceRequest, RuntimeRequest, ScreenRequest};
+use crate::daemon_client::{DaemonCommandClient, SystemDaemonClient};
 use crate::device::{
     discover_supported_devices, select_device, DeviceDiscovery, DiscoveredDevice,
     SystemDeviceDiscovery,
@@ -61,8 +72,22 @@ const SCREEN_ACTIVATE_AFTER_HELP: &str =
     arg_required_else_help = true
 )]
 pub struct Cli {
+    #[arg(long, global = true, help = "Enable debug logging to stderr")]
+    pub debug: bool,
+
     #[command(subcommand)]
     pub command: TopLevelCommand,
+}
+
+#[derive(Debug, Parser, PartialEq, Eq)]
+#[command(
+    name = "vsn1-daemon",
+    version,
+    about = "Host-local daemon for VSN1 CLI command forwarding"
+)]
+pub struct DaemonCli {
+    #[arg(long, global = true, help = "Enable debug logging to stderr")]
+    pub debug: bool,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -233,7 +258,7 @@ pub enum ScreenCommand {
     },
 }
 
-#[derive(Debug, Args, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Args, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetArgs {
     #[arg(
         long,
@@ -256,8 +281,91 @@ pub struct TargetArgs {
     pub dy: Option<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandSuccess {
+    DeviceList {
+        devices: Vec<DiscoveredDevice>,
+    },
+    DeviceInfo {
+        device: String,
+        target: ResolvedTarget,
+    },
+    RuntimeList {
+        runtimes: Vec<DiscoveredRuntime>,
+    },
+    ScreenAction {
+        device: String,
+        target: ResolvedTarget,
+        action: &'static str,
+    },
+    RuntimeStatus {
+        device: String,
+        target: ResolvedTarget,
+        report: Option<RuntimeInspectionReport>,
+        verified: bool,
+    },
+    RuntimeInstall {
+        device: String,
+        target: ResolvedTarget,
+        runtime: Option<DiscoveredRuntime>,
+        report: RuntimeInstallReport,
+    },
+    RuntimeUpgrade {
+        device: String,
+        target: ResolvedTarget,
+        runtime: DiscoveredRuntime,
+        report: RuntimeUpgradeReport,
+    },
+    RuntimeRepair {
+        device: String,
+        target: ResolvedTarget,
+        report: RuntimeInstallReport,
+    },
+    RuntimeRemove {
+        device: String,
+        target: ResolvedTarget,
+        report: RuntimeRemoveReport,
+    },
+}
+
+pub trait CommandExecutor {
+    fn execute(&mut self, request: CommandRequest) -> Result<CommandSuccess>;
+}
+
+pub struct OneShotCommandExecutor<'a, D, F> {
+    discovery: &'a D,
+    transport_factory: &'a mut F,
+}
+
+impl<'a, D, F> OneShotCommandExecutor<'a, D, F> {
+    pub fn new(discovery: &'a D, transport_factory: &'a mut F) -> Self {
+        Self {
+            discovery,
+            transport_factory,
+        }
+    }
+}
+
+impl<D, F> CommandExecutor for OneShotCommandExecutor<'_, D, F>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    fn execute(&mut self, request: CommandRequest) -> Result<CommandSuccess> {
+        execute_command_request_with_one_shot_transport(
+            request,
+            self.discovery,
+            self.transport_factory,
+        )
+    }
+}
+
 pub fn command() -> clap::Command {
     Cli::command()
+}
+
+pub fn daemon_command() -> clap::Command {
+    DaemonCli::command()
 }
 
 pub fn try_parse_from<I, T>(args: I) -> std::result::Result<Cli, clap::Error>
@@ -268,10 +376,35 @@ where
     Cli::try_parse_from(args)
 }
 
+pub fn try_parse_command_request_from<I, T>(
+    args: I,
+) -> std::result::Result<CommandRequest, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    try_parse_from(args).map(CommandRequest::from)
+}
+
+pub fn try_parse_daemon_from<I, T>(args: I) -> std::result::Result<DaemonCli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    DaemonCli::try_parse_from(args)
+}
+
 pub fn run(cli: Cli) -> Result<()> {
+    debug::set_debug_enabled(cli.debug);
     let discovery = SystemDeviceDiscovery;
     let mut transport_factory = SystemTransportFactory;
-    let output = execute_cli(cli, &discovery, &mut transport_factory)?;
+    let mut executor = OneShotCommandExecutor::new(&discovery, &mut transport_factory);
+    let mut daemon_client = SystemDaemonClient::new();
+    let output = execute_and_render_command_with_optional_daemon(
+        &mut executor,
+        &mut daemon_client,
+        CommandRequest::from(cli),
+    )?;
     print!("{output}");
     Ok(())
 }
@@ -281,7 +414,7 @@ pub fn main() -> ExitCode {
         Ok(cli) => match run(cli) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("error: {error}");
+                eprintln!("{}", render_command_error(&error));
                 ExitCode::FAILURE
             }
         },
@@ -296,41 +429,199 @@ pub fn main() -> ExitCode {
     }
 }
 
+pub fn daemon_main() -> ExitCode {
+    let daemon_cli = match try_parse_daemon_from(std::env::args_os()) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = error.exit_code();
+            let _ = error.print();
+
+            return u8::try_from(exit_code)
+                .map(ExitCode::from)
+                .unwrap_or(ExitCode::FAILURE);
+        }
+    };
+
+    debug::set_debug_enabled(daemon_cli.debug);
+    let socket_path = match daemon_socket::resolve_daemon_socket_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    debug::log(
+        "daemon",
+        format!("starting daemon on {}", socket_path.display()),
+    );
+
+    let server = match daemon_server::DaemonServer::bind_with_handler(
+        &socket_path,
+        daemon_command_handler::ScreenDaemonRequestHandler::new(
+            SystemDeviceDiscovery,
+            SystemTransportFactory,
+        ),
+    ) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(error) = server.serve_forever() {
+        eprintln!("error: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
+}
+
+pub fn execute_and_render_command(
+    executor: &mut impl CommandExecutor,
+    request: CommandRequest,
+) -> Result<String> {
+    executor
+        .execute(request)
+        .map(|success| render_command_success(&success))
+}
+
+pub fn execute_and_render_command_with_optional_daemon(
+    executor: &mut impl CommandExecutor,
+    daemon_client: &mut impl DaemonCommandClient,
+    request: CommandRequest,
+) -> Result<String> {
+    if request.is_daemon_eligible() {
+        debug::log("cli", format!("trying daemon for {}", request.debug_name()));
+        if let Some(output) = daemon_client.try_execute(&request)? {
+            debug::log("cli", format!("daemon handled {}", request.debug_name()));
+            return Ok(output);
+        }
+
+        debug::log(
+            "cli",
+            format!(
+                "daemon unavailable for {}; using cold path",
+                request.debug_name()
+            ),
+        );
+    } else {
+        debug::log(
+            "cli",
+            format!("{} is local-only; bypassing daemon", request.debug_name()),
+        );
+    }
+
+    debug::log(
+        "cli",
+        format!("executing cold path for {}", request.debug_name()),
+    );
+    execute_and_render_command(executor, request)
+}
+
+pub fn render_command_success(success: &CommandSuccess) -> String {
+    match success {
+        CommandSuccess::DeviceList { devices } => render_device_list_output(devices),
+        CommandSuccess::DeviceInfo { device, target } => {
+            render_transport_open_output(device, *target, None)
+        }
+        CommandSuccess::RuntimeList { runtimes } => render_runtime_list(runtimes),
+        CommandSuccess::ScreenAction {
+            device,
+            target,
+            action,
+        } => render_transport_open_output(
+            device,
+            *target,
+            Some(format!("Sent {action} over the immediate path.\n")),
+        ),
+        CommandSuccess::RuntimeStatus {
+            device,
+            target,
+            report,
+            verified,
+        } => match report {
+            Some(report) => render_runtime_output(device, *target, report, *verified),
+            None => render_runtime_status_without_local_copy_output(device, *target),
+        },
+        CommandSuccess::RuntimeInstall {
+            device,
+            target,
+            runtime,
+            report,
+        } => render_runtime_install_output(device, *target, runtime.as_ref(), report),
+        CommandSuccess::RuntimeUpgrade {
+            device,
+            target,
+            runtime,
+            report,
+        } => render_runtime_upgrade_output(device, *target, runtime, report),
+        CommandSuccess::RuntimeRepair {
+            device,
+            target,
+            report,
+        } => render_runtime_repair_output(device, *target, report),
+        CommandSuccess::RuntimeRemove {
+            device,
+            target,
+            report,
+        } => render_runtime_remove_output(device, *target, report),
+    }
+}
+
+pub fn render_command_error(error: &Error) -> String {
+    format!("error: {error}")
+}
+
+#[cfg(test)]
 fn execute_cli<D, F>(cli: Cli, discovery: &D, transport_factory: &mut F) -> Result<String>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
 {
-    match cli.command {
-        TopLevelCommand::Device(args) => match args.command {
-            DeviceCommand::List => render_device_list(discovery),
-            DeviceCommand::Info { target } => {
-                render_device_info(discovery, transport_factory, &target)
+    let mut executor = OneShotCommandExecutor::new(discovery, transport_factory);
+    execute_and_render_command(&mut executor, CommandRequest::from(cli))
+}
+
+fn execute_command_request_with_one_shot_transport<D, F>(
+    request: CommandRequest,
+    discovery: &D,
+    transport_factory: &mut F,
+) -> Result<CommandSuccess>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    match request {
+        CommandRequest::Device(command) => match command {
+            DeviceRequest::List => execute_device_list(discovery),
+            DeviceRequest::Info { target } => {
+                execute_device_info(discovery, transport_factory, &target)
             }
         },
-        TopLevelCommand::Runtime(args) => match args.command {
-            RuntimeCommand::List => execute_runtime_list(),
-            RuntimeCommand::Install { name, target } => {
+        CommandRequest::Runtime(command) => match command {
+            RuntimeRequest::List => execute_runtime_list(),
+            RuntimeRequest::Install { name, target } => {
                 execute_runtime_install(discovery, transport_factory, &name, &target)
             }
-            RuntimeCommand::Verify { target } => {
+            RuntimeRequest::Verify { target } => {
                 execute_runtime_verify(discovery, transport_factory, &target)
             }
-            RuntimeCommand::Upgrade { name, target } => {
+            RuntimeRequest::Upgrade { name, target } => {
                 execute_runtime_upgrade(discovery, transport_factory, &name, &target)
             }
-            RuntimeCommand::Repair { target } => {
+            RuntimeRequest::Repair { target } => {
                 execute_runtime_repair(discovery, transport_factory, &target)
             }
-            RuntimeCommand::Remove { target } => {
+            RuntimeRequest::Remove { target } => {
                 execute_runtime_remove(discovery, transport_factory, &target)
             }
-            RuntimeCommand::Status { target } => {
+            RuntimeRequest::Status { target } => {
                 execute_runtime_status(discovery, transport_factory, &target)
             }
         },
-        TopLevelCommand::Screen(args) => match args.command {
-            ScreenCommand::Set {
+        CommandRequest::Screen(command) => match command {
+            ScreenRequest::Set {
                 assignments,
                 activate,
                 target,
@@ -341,24 +632,28 @@ where
                 &assignments,
                 activate,
             ),
-            ScreenCommand::Clear { layer, target } => {
+            ScreenRequest::Clear { layer, target } => {
                 execute_screen_clear(discovery, transport_factory, &target, &layer)
             }
-            ScreenCommand::Raw { lua, target } => {
+            ScreenRequest::Raw { lua, target } => {
                 execute_screen_raw(discovery, transport_factory, &target, &lua)
             }
-            ScreenCommand::Activate { layer, target } => {
+            ScreenRequest::Activate { layer, target } => {
                 execute_screen_activate(discovery, transport_factory, &target, &layer)
             }
         },
     }
 }
 
-fn render_device_list(discovery: &impl DeviceDiscovery) -> Result<String> {
+fn execute_device_list(discovery: &impl DeviceDiscovery) -> Result<CommandSuccess> {
     let devices = discover_supported_devices(discovery)?;
 
+    Ok(CommandSuccess::DeviceList { devices })
+}
+
+fn render_device_list_output(devices: &[DiscoveredDevice]) -> String {
     if devices.is_empty() {
-        return Ok("No supported VSN1/Grid USB serial devices found.\n".to_string());
+        return "No supported VSN1/Grid USB serial devices found.\n".to_string();
     }
 
     let mut output = String::from("Discovered supported VSN1/Grid USB serial devices:\n");
@@ -369,20 +664,20 @@ fn render_device_list(discovery: &impl DeviceDiscovery) -> Result<String> {
         output.push('\n');
     }
 
-    Ok(output)
+    output
 }
 
-fn execute_runtime_list() -> Result<String> {
+fn execute_runtime_list() -> Result<CommandSuccess> {
     let runtimes = discover_runtimes()?;
 
-    if runtimes.is_empty() {
-        return Ok("No runtimes found in system, user, or dev runtime roots.\n".to_string());
-    }
-
-    Ok(render_runtime_list(&runtimes))
+    Ok(CommandSuccess::RuntimeList { runtimes })
 }
 
 fn render_runtime_list(runtimes: &[DiscoveredRuntime]) -> String {
+    if runtimes.is_empty() {
+        return "No runtimes found in system, user, or dev runtime roots.\n".to_string();
+    }
+
     let mut output = String::from("Discovered runtimes:\n");
 
     for runtime in runtimes {
@@ -397,11 +692,11 @@ fn render_runtime_list(runtimes: &[DiscoveredRuntime]) -> String {
     output
 }
 
-fn render_device_info<D, F>(
+fn execute_device_info<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -410,10 +705,10 @@ where
     let device = resolve_usb_device(discovery, target_args)?;
     let _transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
 
-    Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\n",
-        protocol::GRID_BAUD_RATE
-    ))
+    Ok(CommandSuccess::DeviceInfo {
+        device: device.to_string(),
+        target,
+    })
 }
 
 fn execute_screen_raw<D, F>(
@@ -421,7 +716,7 @@ fn execute_screen_raw<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     lua: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -432,10 +727,11 @@ where
 
     send_screen_raw(&mut transport, target.grid_target(), lua)?;
 
-    Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\nSent raw screen update over the immediate path.\n",
-        protocol::GRID_BAUD_RATE
-    ))
+    Ok(CommandSuccess::ScreenAction {
+        device: device.to_string(),
+        target,
+        action: "raw screen update",
+    })
 }
 
 fn execute_screen_set<D, F>(
@@ -444,7 +740,7 @@ fn execute_screen_set<D, F>(
     target_args: &TargetArgs,
     assignments: &[String],
     activate: Option<String>,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -467,7 +763,7 @@ fn execute_screen_set_with_registry<D, F>(
     assignments: &[String],
     activate: Option<String>,
     registry: &ScreenFieldRegistry,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -493,7 +789,7 @@ fn execute_screen_clear<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     layer: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -508,7 +804,7 @@ fn execute_screen_clear_with_registry<D, F>(
     target_args: &TargetArgs,
     layer: &str,
     registry: &ScreenFieldRegistry,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -530,7 +826,7 @@ fn execute_screen_activate<D, F>(
     transport_factory: &mut F,
     target_args: &TargetArgs,
     layer: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -551,7 +847,7 @@ fn execute_screen_activate_with_registry<D, F>(
     target_args: &TargetArgs,
     layer: &str,
     registry: &ScreenFieldRegistry,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -574,7 +870,7 @@ fn execute_curated_screen_lua<D, F>(
     target_args: &TargetArgs,
     lua: &str,
     action: &str,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -584,17 +880,25 @@ where
     let mut transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
     send_screen_raw(&mut transport, target.grid_target(), lua)?;
 
-    Ok(format!(
-        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\nSent {action} over the immediate path.\n",
-        protocol::GRID_BAUD_RATE,
-    ))
+    let action = match action {
+        "curated screen update" => "curated screen update",
+        "screen clear command" => "screen clear command",
+        "screen activation command" => "screen activation command",
+        _ => unreachable!("screen action should use one of the known static labels"),
+    };
+
+    Ok(CommandSuccess::ScreenAction {
+        device: device.to_string(),
+        target,
+        action,
+    })
 }
 
 fn execute_runtime_verify<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -605,12 +909,12 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = verify_installed_runtime(target, &mut reader)?;
 
-    Ok(render_runtime_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeStatus {
+        device: device.to_string(),
         target,
-        &report,
-        true,
-    ))
+        report: Some(report),
+        verified: true,
+    })
 }
 
 fn execute_runtime_install<D, F>(
@@ -618,7 +922,7 @@ fn execute_runtime_install<D, F>(
     transport_factory: &mut F,
     runtime_name: &str,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -630,19 +934,19 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = install_runtime_with_bundle_dir(&runtime.path, target, &mut reader)?;
 
-    Ok(render_runtime_install_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeInstall {
+        device: device.to_string(),
         target,
-        Some(&runtime),
-        &report,
-    ))
+        runtime: Some(runtime),
+        report,
+    })
 }
 
 fn execute_runtime_status<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -653,9 +957,11 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = inspect_installed_runtime(target, &mut reader)?;
 
-    Ok(match report {
-        Some(report) => render_runtime_output(&device.to_string(), target, &report, false),
-        None => render_runtime_status_without_local_copy_output(&device.to_string(), target),
+    Ok(CommandSuccess::RuntimeStatus {
+        device: device.to_string(),
+        target,
+        report,
+        verified: false,
     })
 }
 
@@ -664,7 +970,7 @@ fn execute_runtime_upgrade<D, F>(
     transport_factory: &mut F,
     runtime_name: &str,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -676,19 +982,19 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = upgrade_runtime_with_bundle_dir(&runtime.path, target, &mut reader)?;
 
-    Ok(render_runtime_upgrade_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeUpgrade {
+        device: device.to_string(),
         target,
-        &runtime,
-        &report,
-    ))
+        runtime,
+        report,
+    })
 }
 
 fn execute_runtime_repair<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -699,18 +1005,18 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = repair_installed_runtime(target, &mut reader)?;
 
-    Ok(render_runtime_repair_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeRepair {
+        device: device.to_string(),
         target,
-        &report,
-    ))
+        report,
+    })
 }
 
 fn execute_runtime_remove<D, F>(
     discovery: &D,
     transport_factory: &mut F,
     target_args: &TargetArgs,
-) -> Result<String>
+) -> Result<CommandSuccess>
 where
     D: DeviceDiscovery,
     F: SerialTransportFactory,
@@ -721,11 +1027,28 @@ where
     let mut reader = TransportRuntimeSlotReader::new(transport)?;
     let report = remove_installed_runtime(target, &mut reader)?;
 
-    Ok(render_runtime_remove_output(
-        &device.to_string(),
+    Ok(CommandSuccess::RuntimeRemove {
+        device: device.to_string(),
         target,
-        &report,
-    ))
+        report,
+    })
+}
+
+fn render_transport_open_output(
+    device: &str,
+    target: ResolvedTarget,
+    detail: Option<String>,
+) -> String {
+    let mut output = format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {target}\n",
+        protocol::GRID_BAUD_RATE,
+    );
+
+    if let Some(detail) = detail {
+        output.push_str(&detail);
+    }
+
+    output
 }
 
 fn render_runtime_output(
@@ -891,12 +1214,18 @@ fn render_runtime_remove_output(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::os::unix::net::UnixListener;
     use std::rc::Rc;
+    use std::thread;
 
+    use crate::daemon_client::{DaemonClientError, DaemonCommandClient, SystemDaemonClient};
+    use crate::daemon_command_handler::ScreenDaemonRequestHandler;
+    use crate::daemon_server::DaemonServer;
     use crate::device::{DeviceError, DiscoveredDevice};
     use crate::transport::{
         FakeTransportFactory, OpenCall, SerialTransport, SerialTransportFactory, TransportError,
     };
+    use tempfile::tempdir;
 
     #[derive(Debug, Default)]
     struct RecordingTransport {
@@ -1059,6 +1388,61 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingExecutor {
+        calls: Rc<RefCell<Vec<CommandRequest>>>,
+        response: Result<CommandSuccess>,
+    }
+
+    impl RecordingExecutor {
+        fn new(response: Result<CommandSuccess>) -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                response,
+            }
+        }
+
+        fn calls(&self) -> Vec<CommandRequest> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl CommandExecutor for RecordingExecutor {
+        fn execute(&mut self, request: CommandRequest) -> Result<CommandSuccess> {
+            self.calls.borrow_mut().push(request);
+            self.response.clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingDaemonClient {
+        calls: Rc<RefCell<Vec<CommandRequest>>>,
+        response: crate::daemon_client::Result<Option<String>>,
+    }
+
+    impl RecordingDaemonClient {
+        fn new(response: crate::daemon_client::Result<Option<String>>) -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                response,
+            }
+        }
+
+        fn calls(&self) -> Vec<CommandRequest> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl DaemonCommandClient for RecordingDaemonClient {
+        fn try_execute(
+            &mut self,
+            request: &CommandRequest,
+        ) -> crate::daemon_client::Result<Option<String>> {
+            self.calls.borrow_mut().push(request.clone());
+            self.response.clone()
+        }
+    }
+
     impl SerialTransportFactory for SingleOpenTransportFactory {
         type Transport = SingleOpenTransport;
 
@@ -1156,6 +1540,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::List,
                 }),
@@ -1170,6 +1555,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs {
@@ -1197,6 +1583,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs {
@@ -1217,6 +1604,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Verify {
                         target: TargetArgs::default(),
@@ -1233,6 +1621,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::List,
                 }),
@@ -1247,6 +1636,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Install {
                         name: "default".to_string(),
@@ -1267,6 +1657,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Upgrade {
                         name: "default".to_string(),
@@ -1301,6 +1692,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Set {
                         assignments: vec![
@@ -1326,6 +1718,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Clear {
                         layer: "fast".to_string(),
@@ -1343,6 +1736,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Activate {
                         layer: "persistent".to_string(),
@@ -1366,6 +1760,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "return update_param('persistent.title', 'Hello')".to_string(),
@@ -1384,6 +1779,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Set {
                         assignments: vec!["persistent.title=left=right".to_string()],
@@ -1396,6 +1792,475 @@ mod tests {
     }
 
     #[test]
+    fn parses_device_list_into_a_local_only_command_request() {
+        let request = try_parse_command_request_from(["vsn1-cli", "device", "list"]).unwrap();
+
+        assert_eq!(request, CommandRequest::Device(DeviceRequest::List));
+        assert!(request.is_local_only());
+    }
+
+    #[test]
+    fn parses_top_level_debug_flag() {
+        let cli = try_parse_from(["vsn1-cli", "--debug", "device", "list"]).unwrap();
+
+        assert!(cli.debug);
+        assert_eq!(
+            cli.command,
+            TopLevelCommand::Device(DeviceArgs {
+                command: DeviceCommand::List,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_daemon_debug_flag() {
+        let cli = try_parse_daemon_from(["vsn1-daemon", "--debug"]).unwrap();
+
+        assert!(cli.debug);
+    }
+
+    #[test]
+    fn parses_runtime_verify_into_a_daemon_eligible_command_request() {
+        let request = try_parse_command_request_from(["vsn1-cli", "runtime", "verify"]).unwrap();
+
+        assert_eq!(
+            request,
+            CommandRequest::Runtime(RuntimeRequest::Verify {
+                target: TargetArgs::default(),
+            })
+        );
+        assert!(request.is_daemon_eligible());
+    }
+
+    #[test]
+    fn parses_screen_set_into_a_daemon_eligible_command_request() {
+        let request = try_parse_command_request_from([
+            "vsn1-cli",
+            "screen",
+            "set",
+            "persistent.title=Hello",
+            "--activate",
+            "persistent",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            request,
+            CommandRequest::Screen(ScreenRequest::Set {
+                assignments: vec!["persistent.title=Hello".to_string()],
+                activate: Some("persistent".to_string()),
+                target: TargetArgs::default(),
+            })
+        );
+        assert!(request.is_daemon_eligible());
+    }
+
+    #[test]
+    fn render_command_error_reuses_the_shared_error_format() {
+        let error = Error::from(TransportError::open("Device or resource busy"));
+
+        assert_eq!(
+            render_command_error(&error),
+            "error: transport open failed: Device or resource busy"
+        );
+    }
+
+    #[test]
+    fn direct_success_rendering_matches_execute_and_render_for_device_info() {
+        let request = CommandRequest::Device(DeviceRequest::Info {
+            target: TargetArgs::default(),
+        });
+        let discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&discovery, &mut direct_transport_factory);
+        let success = direct_executor.execute(request.clone()).unwrap();
+        let direct_output = render_command_success(&success);
+
+        let mut rendered_transport_factory = FakeTransportFactory::default();
+        let mut rendered_executor =
+            OneShotCommandExecutor::new(&discovery, &mut rendered_transport_factory);
+        let rendered_output = execute_and_render_command(&mut rendered_executor, request).unwrap();
+
+        assert_eq!(direct_output, rendered_output);
+        assert!(direct_output.contains("Transport: opened successfully at 2000000 baud"));
+    }
+
+    #[test]
+    fn local_only_requests_bypass_the_daemon_client() {
+        let request = CommandRequest::Device(DeviceRequest::List);
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = RecordingDaemonClient::new(Ok(Some("daemon output\n".to_string())));
+
+        let output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(output, "No supported VSN1/Grid USB serial devices found.\n");
+        assert_eq!(executor.calls(), vec![request]);
+        assert!(daemon_client.calls().is_empty());
+    }
+
+    #[test]
+    fn daemon_unavailable_falls_back_to_local_execution() {
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::ScreenAction {
+            device: "/dev/ttyACM0".to_string(),
+            target: ResolvedTarget::Broadcast,
+            action: "raw screen update",
+        }));
+        let mut daemon_client = RecordingDaemonClient::new(Ok(None));
+
+        let output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap();
+
+        assert!(output.contains("Sent raw screen update over the immediate path."));
+        assert_eq!(executor.calls(), vec![request.clone()]);
+        assert_eq!(daemon_client.calls(), vec![request]);
+    }
+
+    #[test]
+    fn daemon_errors_do_not_fall_back_to_local_execution() {
+        let request = CommandRequest::Runtime(RuntimeRequest::Verify {
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::RuntimeList {
+            runtimes: Vec::new(),
+        }));
+        let mut daemon_client = RecordingDaemonClient::new(Err(DaemonClientError::Execution {
+            message: "boom".to_string(),
+        }));
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "daemon execution failed: boom");
+        assert!(executor.calls().is_empty());
+        assert_eq!(daemon_client.calls(), vec![request]);
+    }
+
+    #[test]
+    fn stale_socket_falls_back_as_daemon_unavailable() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        drop(listener);
+
+        let request = CommandRequest::Runtime(RuntimeRequest::Verify {
+            target: TargetArgs::default(),
+        });
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let response = daemon_client.try_execute(&request).unwrap();
+
+        assert_eq!(response, None);
+    }
+
+    #[test]
+    fn missing_socket_falls_back_to_local_execution() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("missing.sock");
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::ScreenAction {
+            device: "/dev/ttyACM0".to_string(),
+            target: ResolvedTarget::Broadcast,
+            action: "raw screen update",
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request.clone(),
+        )
+        .unwrap();
+
+        assert!(output.contains("Sent raw screen update over the immediate path."));
+        assert_eq!(executor.calls(), vec![request]);
+    }
+
+    #[test]
+    fn live_daemon_execution_errors_do_not_fall_back_locally() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind(&socket_path).unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Runtime(RuntimeRequest::Verify {
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::RuntimeList {
+            runtimes: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap_err();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon execution failed: daemon command execution path is not implemented yet"
+        );
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_screen_raw_uses_daemon_output_without_local_fallback() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                FakeTransportFactory::default(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let direct_discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&direct_discovery, &mut direct_transport_factory);
+        let expected_output =
+            execute_and_render_command(&mut direct_executor, request.clone()).unwrap();
+
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let daemon_output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(daemon_output, expected_output);
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_device_info_uses_daemon_output_without_local_fallback() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                FakeTransportFactory::default(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Device(DeviceRequest::Info {
+            target: TargetArgs::default(),
+        });
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let direct_discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&direct_discovery, &mut direct_transport_factory);
+        let expected_output =
+            execute_and_render_command(&mut direct_executor, request.clone()).unwrap();
+
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let daemon_output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(daemon_output, expected_output);
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_runtime_status_uses_daemon_output_without_local_fallback() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                FakeTransportFactory::default(),
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Runtime(RuntimeRequest::Status {
+            target: TargetArgs::default(),
+        });
+        let mut direct_transport_factory = FakeTransportFactory::default();
+        let direct_discovery = StaticDiscovery {
+            devices: vec![test_device("/dev/ttyACM0")],
+            error: None,
+        };
+        let mut direct_executor =
+            OneShotCommandExecutor::new(&direct_discovery, &mut direct_transport_factory);
+        let expected_output =
+            execute_and_render_command(&mut direct_executor, request.clone()).unwrap();
+
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let daemon_output = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(daemon_output, expected_output);
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_busy_port_failures_do_not_fall_back_locally() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let mut transport_factory = FakeTransportFactory::default();
+        transport_factory.fail_next_open(TransportError::open("Device or resource busy"));
+        let server = DaemonServer::bind_with_handler(
+            &socket_path,
+            ScreenDaemonRequestHandler::with_idle_timeout(
+                StaticDiscovery {
+                    devices: vec![test_device("/dev/ttyACM0")],
+                    error: None,
+                },
+                transport_factory,
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+        let server_thread = thread::spawn(move || server.serve_one());
+
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap_err();
+
+        server_thread.join().unwrap().unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon execution failed: transport open failed: Device or resource busy"
+        );
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
+    fn live_daemon_disconnect_does_not_fall_back_locally() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server_thread = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+        });
+
+        let request = CommandRequest::Screen(ScreenRequest::Raw {
+            lua: "return 1".to_string(),
+            target: TargetArgs::default(),
+        });
+        let mut executor = RecordingExecutor::new(Ok(CommandSuccess::DeviceList {
+            devices: Vec::new(),
+        }));
+        let mut daemon_client = SystemDaemonClient::with_socket_path(&socket_path);
+
+        let error = execute_and_render_command_with_optional_daemon(
+            &mut executor,
+            &mut daemon_client,
+            request,
+        )
+        .unwrap_err();
+
+        server_thread.join().unwrap();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("invalid daemon protocol message")
+                || message.contains("daemon I/O failed")
+        );
+        assert!(executor.calls().is_empty());
+    }
+
+    #[test]
     fn device_info_defaults_to_broadcast_and_opens_the_selected_transport() {
         let discovery = StaticDiscovery {
             devices: vec![test_device("/dev/ttyACM0")],
@@ -1405,6 +2270,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs::default(),
@@ -1436,6 +2302,7 @@ mod tests {
 
         let error = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs::default(),
@@ -1463,6 +2330,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs {
@@ -1501,6 +2369,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Device(DeviceArgs {
                     command: DeviceCommand::Info {
                         target: TargetArgs::default(),
@@ -1530,6 +2399,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Remove {
                         target: TargetArgs {
@@ -1551,6 +2421,7 @@ mod tests {
         assert_eq!(
             cli,
             Cli {
+                debug: false,
                 command: TopLevelCommand::Runtime(RuntimeArgs {
                     command: RuntimeCommand::Remove {
                         target: TargetArgs {
@@ -1574,6 +2445,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "return 1".to_string(),
@@ -1612,6 +2484,7 @@ mod tests {
     fn screen_raw_surfaces_targeting_errors() {
         let error = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "return 1".to_string(),
@@ -1647,6 +2520,7 @@ mod tests {
 
         let output = execute_cli(
             Cli {
+                debug: false,
                 command: TopLevelCommand::Screen(ScreenArgs {
                     command: ScreenCommand::Raw {
                         lua: "snowman = '☃'".to_string(),
@@ -1679,15 +2553,17 @@ mod tests {
         let mut transport_factory = FakeTransportFactory::default();
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let output = execute_screen_set_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs::default(),
-            &["persistent.title=Hello".to_string()],
-            None,
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_set_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs::default(),
+                &["persistent.title=Hello".to_string()],
+                None,
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
@@ -1702,18 +2578,20 @@ mod tests {
         };
         let mut transport_factory = FakeTransportFactory::default();
 
-        let output = execute_screen_set_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs::default(),
-            &[
-                "persistent.title=Hello".to_string(),
-                "slow.message=World".to_string(),
-            ],
-            Some("slow".to_string()),
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_set_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs::default(),
+                &[
+                    "persistent.title=Hello".to_string(),
+                    "slow.message=World".to_string(),
+                ],
+                Some("slow".to_string()),
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
@@ -1749,14 +2627,16 @@ mod tests {
         let mut transport_factory = FakeTransportFactory::default();
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let output = execute_screen_activate_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs::default(),
-            "persistent",
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_activate_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs::default(),
+                "persistent",
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent screen activation command over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
@@ -1771,19 +2651,21 @@ mod tests {
         let mut transport_factory = SingleOpenTransportFactory::new(Vec::new());
         let registry = ScreenFieldRegistry::bundled().unwrap();
 
-        let output = execute_screen_set_with_registry(
-            &discovery,
-            &mut transport_factory,
-            &TargetArgs {
-                device: None,
-                dx: Some(0),
-                dy: Some(0),
-            },
-            &["persistent.title=Hello".to_string()],
-            None,
-            &registry,
-        )
-        .unwrap();
+        let output = render_command_success(
+            &execute_screen_set_with_registry(
+                &discovery,
+                &mut transport_factory,
+                &TargetArgs {
+                    device: None,
+                    dx: Some(0),
+                    dy: Some(0),
+                },
+                &["persistent.title=Hello".to_string()],
+                None,
+                &registry,
+            )
+            .unwrap(),
+        );
 
         assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls.len(), 1);

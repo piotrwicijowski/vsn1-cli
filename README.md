@@ -2,7 +2,7 @@
 
 Standalone Rust CLI for controlling the `VSN1` screen directly over USB.
 
-This project is intentionally screen-first and one-shot only. The CLI provisions a named runtime onto the device, freezes a local copy under `~/.config/vsn1-cli/runtime`, and then uses fast framed `IMMEDIATE` Lua updates for live screen control.
+This project is intentionally screen-first. The baseline cold path still works as a one-shot CLI, and the current implementation also supports an optional `vsn1-daemon` process that can keep per-device ports warm between commands.
 
 ## Current Scope
 
@@ -11,6 +11,7 @@ This project is intentionally screen-first and one-shot only. The CLI provisions
 - Curated public commands are grouped under `device`, `runtime`, and `screen`.
 - Curated screen mutations load their field metadata from the frozen installed runtime copy under `~/.config/vsn1-cli/runtime`.
 - Curated `screen` commands now use manifest-defined layer inventory from the frozen installed runtime copy. The shipped `default` runtime currently declares `persistent`, `slow`, and `fast`, but other runtimes may declare different layer names and activation behavior.
+- When `vsn1-daemon` is running, `vsn1-cli` automatically forwards serial-port-touching commands to it; when the daemon is not running, the CLI falls back to the existing cold path.
 
 ## Install And Build
 
@@ -20,19 +21,28 @@ Build from the checkout:
 cargo build
 ```
 
-Install the CLI system-wide with the checked-in runtimes:
+Install for the current host OS, including the matching daemon service definition:
 
 ```bash
-make install
 sudo make install
+```
+
+Explicit platform targets are also available:
+
+```bash
+sudo make install-linux
+sudo make install-macos
 ```
 
 Default install locations:
 
 - binary: `/usr/local/bin/vsn1-cli`
+- daemon: `/usr/local/bin/vsn1-daemon`
 - runtimes: `/usr/share/vsn1-cli/runtimes`
+- Linux user unit: `/usr/lib/systemd/user/vsn1-daemon.service`
+- macOS LaunchAgent: `/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist`
 
-Override paths for packaging or staged installs with `DESTDIR`, `BINDIR`, or `RUNTIME_ROOT`.
+Override paths for packaging or staged installs with `DESTDIR`, `BINDIR`, `RUNTIME_ROOT`, `SYSTEMD_USER_UNITDIR`, or `LAUNCHD_AGENT_DIR`.
 
 Quick verification after install:
 
@@ -51,6 +61,13 @@ Show help from the dev checkout without installing:
 
 ```bash
 cargo run -- --help
+```
+
+Enable debug logging to stderr:
+
+```bash
+cargo run -- --debug device list
+cargo run --bin vsn1-daemon -- --debug
 ```
 
 ## Device Commands
@@ -213,3 +230,111 @@ Curated `screen` commands compile to the generic runtime helper contract used by
 ## Validation Notes
 
 See `docs/validation-matrix.md` for the current host/hardware validation record and known constraints.
+
+## Optional Daemon
+
+`vsn1-daemon` is an optional host-local Unix-socket service that owns the USB serial port on behalf of repeated `vsn1-cli` invocations.
+
+Current daemon behavior:
+
+- `device list` and `runtime list` stay local and never talk to the daemon.
+- `device info`, all `screen` commands, and all serial-port-touching `runtime` commands use the daemon automatically when it is reachable.
+- If the daemon socket is missing or stale, `vsn1-cli` falls back to the cold path.
+- If a live daemon returns an execution or protocol error, `vsn1-cli` surfaces that error and does not retry locally.
+- The daemon keeps one worker per resolved device path and closes each port after `5s` of inactivity.
+
+Socket resolution:
+
+- override: `VSN1_DAEMON_SOCKET`
+- Linux default: `$XDG_RUNTIME_DIR/vsn1-cli/daemon.sock`
+- macOS default: `$TMPDIR/vsn1-cli/daemon.sock`
+
+Run the daemon directly from a checkout:
+
+```bash
+cargo run --bin vsn1-daemon
+```
+
+Add `--debug` to either binary to log daemon connection attempts, fallback decisions, accepted daemon requests, and handler outcomes to stderr.
+
+Example service files are checked in at:
+
+- `assets/services/vsn1-daemon.service`
+- `assets/services/com.vsn1.vsn1-daemon.plist`
+
+These examples assume `/usr/local/bin/vsn1-daemon`. If you install the daemon somewhere else, update `ExecStart=` in the systemd unit or `ProgramArguments[0]` in the launchd plist before enabling it.
+
+### systemd --user
+
+Install the binaries, runtimes, and systemd user-unit definition:
+
+```bash
+sudo make install-linux
+```
+
+To install just the unit file, run:
+
+```bash
+sudo make install-systemd-user-service
+```
+
+That target copies `assets/services/vsn1-daemon.service` to `/usr/lib/systemd/user/vsn1-daemon.service` by default.
+
+Enable and start the daemon:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now vsn1-daemon.service
+```
+
+Useful follow-up commands:
+
+```bash
+systemctl --user status vsn1-daemon.service
+journalctl --user -u vsn1-daemon.service -f
+```
+
+Disable and remove the user unit later:
+
+```bash
+systemctl --user disable --now vsn1-daemon.service
+sudo make uninstall-systemd-user-service
+systemctl --user daemon-reload
+```
+
+### launchd
+
+Install the binaries, runtimes, and LaunchAgent definition:
+
+```bash
+sudo make install-macos
+```
+
+To install just the LaunchAgent plist, run:
+
+```bash
+sudo make install-launchd-agent
+```
+
+That target copies `assets/services/com.vsn1.vsn1-daemon.plist` to `/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist` by default.
+
+Load and start the daemon for the current user:
+
+```bash
+sudo launchctl bootstrap "gui/$(id -u)" "/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist"
+sudo launchctl kickstart -k "gui/$(id -u)/com.vsn1.vsn1-daemon"
+```
+
+Useful follow-up commands:
+
+```bash
+launchctl print "gui/$(id -u)/com.vsn1.vsn1-daemon"
+tail -f /tmp/vsn1-daemon.stderr.log
+```
+
+Unload and remove the LaunchAgent later:
+
+```bash
+sudo launchctl bootout "gui/$(id -u)" "/Library/LaunchAgents/com.vsn1.vsn1-daemon.plist"
+sudo make uninstall-launchd-agent
+```
