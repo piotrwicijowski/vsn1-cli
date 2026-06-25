@@ -1238,6 +1238,11 @@ mod tests {
             Ok(())
         }
 
+        fn write_evaluate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+            self.immediate_writes.borrow_mut().push(packet.to_vec());
+            Ok(())
+        }
+
         fn write_config(&mut self, _packet: &[u8]) -> std::result::Result<(), TransportError> {
             panic!("screen raw should not use config writes")
         }
@@ -1319,6 +1324,11 @@ mod tests {
 
     impl SerialTransport for SingleOpenTransport {
         fn write_immediate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+            self.immediate_writes.borrow_mut().push(packet.to_vec());
+            Ok(())
+        }
+
+        fn write_evaluate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
             self.immediate_writes.borrow_mut().push(packet.to_vec());
             Ok(())
         }

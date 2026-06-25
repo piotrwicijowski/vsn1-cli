@@ -410,6 +410,10 @@ mod tests {
             Ok(())
         }
 
+        fn write_evaluate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+            self.write_immediate(packet)
+        }
+
         fn write_config(&mut self, _packet: &[u8]) -> std::result::Result<(), TransportError> {
             Ok(())
         }

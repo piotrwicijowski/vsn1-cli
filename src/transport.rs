@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serialport::SerialPort;
 
-use crate::protocol::{self, ConfigFetch, ConfigWrite, Heartbeat, ImmediateWrite};
+use crate::protocol::{self, ConfigFetch, ConfigWrite, EvaluateWrite, Heartbeat, ImmediateWrite};
 use crate::Result;
 
 const SERIAL_TIMEOUT: Duration = Duration::from_millis(250);
@@ -15,6 +15,7 @@ const SERIAL_TIMEOUT: Duration = Duration::from_millis(250);
 pub enum TransportOperation {
     Open,
     Immediate,
+    Evaluate,
     Config,
     Read,
 }
@@ -27,6 +28,7 @@ pub struct TransportError {
 
 pub trait SerialTransport {
     fn write_immediate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError>;
+    fn write_evaluate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError>;
     fn write_config(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError>;
     fn bytes_to_read(&self) -> std::result::Result<u32, TransportError>;
     fn read(&mut self, buffer: &mut [u8]) -> std::result::Result<usize, TransportError>;
@@ -58,10 +60,13 @@ pub struct OpenCall {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FakeTransport {
     immediate_writes: Vec<Vec<u8>>,
+    evaluate_writes: Vec<Vec<u8>>,
     config_writes: Vec<Vec<u8>>,
     next_immediate_error: Option<TransportError>,
+    next_evaluate_error: Option<TransportError>,
     next_config_error: Option<TransportError>,
     next_read_error: Option<TransportError>,
+    queued_read_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -81,6 +86,13 @@ impl TransportError {
     pub fn immediate(message: impl Into<String>) -> Self {
         Self {
             operation: TransportOperation::Immediate,
+            message: message.into(),
+        }
+    }
+
+    pub fn evaluate(message: impl Into<String>) -> Self {
+        Self {
+            operation: TransportOperation::Evaluate,
             message: message.into(),
         }
     }
@@ -116,6 +128,7 @@ impl fmt::Display for TransportError {
         let operation = match self.operation {
             TransportOperation::Open => "transport open",
             TransportOperation::Immediate => "immediate",
+            TransportOperation::Evaluate => "evaluate",
             TransportOperation::Config => "config",
             TransportOperation::Read => "transport read",
         };
@@ -159,6 +172,17 @@ impl SerialTransport for SystemSerialTransport {
         Ok(())
     }
 
+    fn write_evaluate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+        self.port
+            .write_all(packet)
+            .map_err(|error| TransportError::from_io(TransportOperation::Evaluate, error))?;
+        self.port
+            .flush()
+            .map_err(|error| TransportError::from_io(TransportOperation::Evaluate, error))?;
+
+        Ok(())
+    }
+
     fn write_config(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
         self.port
             .write_all(packet)
@@ -194,6 +218,10 @@ impl FakeTransport {
         self.next_immediate_error = Some(error);
     }
 
+    pub fn fail_next_evaluate(&mut self, error: TransportError) {
+        self.next_evaluate_error = Some(error);
+    }
+
     pub fn fail_next_config(&mut self, error: TransportError) {
         self.next_config_error = Some(error);
     }
@@ -206,8 +234,16 @@ impl FakeTransport {
         &self.immediate_writes
     }
 
+    pub fn evaluate_writes(&self) -> &[Vec<u8>] {
+        &self.evaluate_writes
+    }
+
     pub fn config_writes(&self) -> &[Vec<u8>] {
         &self.config_writes
+    }
+
+    pub fn queue_read_data(&mut self, bytes: impl AsRef<[u8]>) {
+        self.queued_read_bytes.extend_from_slice(bytes.as_ref());
     }
 }
 
@@ -252,6 +288,15 @@ impl SerialTransport for FakeTransport {
         Ok(())
     }
 
+    fn write_evaluate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+        if let Some(error) = self.next_evaluate_error.take() {
+            return Err(error);
+        }
+
+        self.evaluate_writes.push(packet.to_vec());
+        Ok(())
+    }
+
     fn write_config(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
         if let Some(error) = self.next_config_error.take() {
             return Err(error);
@@ -262,15 +307,18 @@ impl SerialTransport for FakeTransport {
     }
 
     fn bytes_to_read(&self) -> std::result::Result<u32, TransportError> {
-        Ok(0)
+        Ok(self.queued_read_bytes.len() as u32)
     }
 
-    fn read(&mut self, _buffer: &mut [u8]) -> std::result::Result<usize, TransportError> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::result::Result<usize, TransportError> {
         if let Some(error) = self.next_read_error.take() {
             return Err(error);
         }
 
-        Ok(0)
+        let read_len = buffer.len().min(self.queued_read_bytes.len());
+        buffer[..read_len].copy_from_slice(&self.queued_read_bytes[..read_len]);
+        self.queued_read_bytes.drain(..read_len);
+        Ok(read_len)
     }
 
     fn clear_input(&mut self) -> std::result::Result<(), TransportError> {
@@ -284,6 +332,15 @@ pub fn send_immediate(
 ) -> Result<()> {
     let packet = protocol::encode_immediate_packet(write)?;
     transport.write_immediate(&packet)?;
+    Ok(())
+}
+
+pub fn send_evaluate(
+    transport: &mut impl SerialTransport,
+    write: &EvaluateWrite<'_>,
+) -> Result<()> {
+    let packet = protocol::encode_evaluate_packet(write)?;
+    transport.write_evaluate(&packet)?;
     Ok(())
 }
 
@@ -311,7 +368,7 @@ mod tests {
     use crate::protocol::{ConfigLocation, GridTarget, PacketIdentity};
 
     #[test]
-    fn fake_transport_keeps_immediate_and_config_paths_separate() {
+    fn fake_transport_keeps_immediate_evaluate_and_config_paths_separate() {
         let mut transport = FakeTransport::default();
 
         send_immediate(
@@ -335,9 +392,21 @@ mod tests {
         )
         .unwrap();
 
+        send_evaluate(
+            &mut transport,
+            &EvaluateWrite {
+                target: GridTarget::new(0, 0),
+                lua: "return 3",
+                identity: PacketIdentity::new(0, 3),
+            },
+        )
+        .unwrap();
+
         assert_eq!(transport.immediate_writes().len(), 1);
+        assert_eq!(transport.evaluate_writes().len(), 1);
         assert_eq!(transport.config_writes().len(), 1);
         assert_eq!(&transport.immediate_writes()[0][24..27], b"085");
+        assert_eq!(&transport.evaluate_writes()[0][24..27], b"086");
         assert_eq!(&transport.config_writes()[0][24..27], b"060");
     }
 
@@ -385,6 +454,41 @@ mod tests {
             error.to_string(),
             "config transport write failed: permission denied"
         );
+    }
+
+    #[test]
+    fn send_evaluate_maps_transport_failures() {
+        let mut transport = FakeTransport::default();
+        transport.fail_next_evaluate(TransportError::evaluate("permission denied"));
+
+        let error = send_evaluate(
+            &mut transport,
+            &EvaluateWrite {
+                target: GridTarget::new(0, 0),
+                lua: "return 2",
+                identity: PacketIdentity::new(0, 2),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "evaluate transport write failed: permission denied"
+        );
+    }
+
+    #[test]
+    fn fake_transport_can_queue_read_data() {
+        let mut transport = FakeTransport::default();
+        transport.queue_read_data([1u8, 2, 3, 4]);
+
+        assert_eq!(transport.bytes_to_read().unwrap(), 4);
+
+        let mut buffer = [0u8; 2];
+        let read_len = transport.read(&mut buffer).unwrap();
+        assert_eq!(read_len, 2);
+        assert_eq!(&buffer, &[1, 2]);
+        assert_eq!(transport.bytes_to_read().unwrap(), 2);
     }
 
     #[test]

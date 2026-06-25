@@ -365,6 +365,13 @@ impl SerialTransport for BorrowedSerialTransport<'_> {
         self.0.write_immediate(packet)
     }
 
+    fn write_evaluate(
+        &mut self,
+        packet: &[u8],
+    ) -> std::result::Result<(), crate::transport::TransportError> {
+        self.0.write_evaluate(packet)
+    }
+
     fn write_config(
         &mut self,
         packet: &[u8],
@@ -519,6 +526,10 @@ mod tests {
             }
 
             Ok(())
+        }
+
+        fn write_evaluate(&mut self, packet: &[u8]) -> std::result::Result<(), TransportError> {
+            self.write_immediate(packet)
         }
 
         fn write_config(&mut self, _packet: &[u8]) -> std::result::Result<(), TransportError> {

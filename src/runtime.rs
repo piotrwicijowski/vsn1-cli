@@ -8,8 +8,8 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::protocol::{
-    self, ConfigFetch, ConfigLocation, ConfigWrite, GridTarget, Heartbeat, PacketIdentity,
-    PageActive, PageStore, ProtocolError,
+    self, ConfigFetch, ConfigLocation, ConfigWrite, EvaluateWrite, GridTarget, Heartbeat, LuaValue,
+    PacketIdentity, PageActive, PageStore, ProtocolError,
 };
 use crate::runtime_bundle::{
     normalize_text_content, normalized_sha256, OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle,
@@ -112,6 +112,12 @@ pub struct RuntimeRemoveReport {
     removed_slots: Vec<OwnedRuntimeSlot>,
     restored_from_backup: bool,
     warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeEvaluateReport {
+    pub source_target: GridTarget,
+    pub values: Vec<LuaValue>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -365,6 +371,29 @@ where
 
     pub fn into_inner(self) -> T {
         self.transport
+    }
+
+    pub fn evaluate_lua(
+        &mut self,
+        target: ResolvedTarget,
+        lua: &str,
+    ) -> Result<RuntimeEvaluateReport> {
+        self.transport.clear_input()?;
+
+        let packet = protocol::encode_evaluate_packet(&EvaluateWrite {
+            target: target.grid_target(),
+            lua,
+            identity: self.next_identity(),
+        })?;
+        self.transport.write_evaluate(&packet)?;
+
+        let inbound = read_transport_until_idle(
+            &mut self.transport,
+            READ_BACK_TOTAL_WINDOW,
+            READ_BACK_IDLE_WINDOW,
+        )?;
+
+        extract_single_evaluate_report(&inbound, target)
     }
 }
 
@@ -1306,6 +1335,69 @@ fn extract_page_store_ack(inbound: &[u8], requested_target: ResolvedTarget) -> R
     }
 }
 
+fn extract_single_evaluate_report(
+    inbound: &[u8],
+    requested_target: ResolvedTarget,
+) -> Result<RuntimeEvaluateReport> {
+    let mut reports = Vec::new();
+
+    for frame in split_complete_frames(inbound) {
+        if !verify_grid_frame_checksum(frame) {
+            continue;
+        }
+
+        let Some(source_x) = parse_grid_coordinate_range(frame, 10) else {
+            continue;
+        };
+        let Some(source_y) = parse_grid_coordinate_range(frame, 12) else {
+            continue;
+        };
+        let source_target = GridTarget::new(source_x, source_y);
+
+        for block in split_class_blocks(frame) {
+            let Ok(values) = protocol::parse_evaluate_response(block) else {
+                continue;
+            };
+
+            reports.push(RuntimeEvaluateReport {
+                source_target,
+                values,
+            });
+        }
+    }
+
+    let mut unique_reports = Vec::new();
+    for report in reports {
+        if !unique_reports.iter().any(|existing| existing == &report) {
+            unique_reports.push(report);
+        }
+    }
+
+    match unique_reports.as_slice() {
+        [] => Err(RuntimeError::unexpected_response(
+            "no EVALUATE report was observed in read-back",
+        )),
+        [report] => match requested_target {
+            ResolvedTarget::Explicit(expected) if report.source_target != expected => {
+                Err(RuntimeError::verification_failed(format!(
+                    "evaluate response came back from dx={} dy={} instead of the requested target",
+                    report.source_target.dx, report.source_target.dy
+                )))
+            }
+            _ => Ok(report.clone()),
+        },
+        reports => Err(RuntimeError::unexpected_response(format!(
+            "multiple EVALUATE reports were returned ({})",
+            format_targets(
+                &reports
+                    .iter()
+                    .map(|report| report.source_target)
+                    .collect::<Vec<_>>()
+            )
+        ))),
+    }
+}
+
 fn split_complete_frames(bytes: &[u8]) -> Vec<&[u8]> {
     let mut frames = Vec::new();
     let mut frame_start = 0;
@@ -1435,12 +1527,92 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::protocol::frame_lua;
+    use crate::protocol::{frame_lua, LuaValue};
     use crate::runtime_bundle::normalize_text_content;
+    use crate::transport::FakeTransport;
+
+    #[test]
+    fn transport_runtime_slot_reader_evaluates_lua_and_decodes_response() {
+        let mut transport = FakeTransport::default();
+        let frame = evaluate_response_frame(GridTarget::new(0, 0), b"\x02086d00010300011\x03\x04");
+        assert_eq!(split_complete_frames(&frame).len(), 1);
+        assert!(verify_grid_frame_checksum(&frame));
+        let blocks = split_class_blocks(&frame);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0], b"\x02086d00010300011\x03");
+        assert_eq!(
+            protocol::parse_evaluate_response(blocks[0]).unwrap(),
+            vec![LuaValue::Number(1.0)]
+        );
+        transport.queue_read_data(frame);
+
+        let mut reader = TransportRuntimeSlotReader::new(transport).unwrap();
+        let report = reader
+            .evaluate_lua(ResolvedTarget::Explicit(GridTarget::new(0, 0)), "return 1")
+            .unwrap();
+
+        assert_eq!(report.source_target, GridTarget::new(0, 0));
+        assert_eq!(report.values, vec![LuaValue::Number(1.0)]);
+
+        let transport = reader.into_inner();
+        assert_eq!(transport.evaluate_writes().len(), 1);
+        assert_eq!(&transport.evaluate_writes()[0][24..27], b"086");
+    }
+
+    #[test]
+    fn transport_runtime_slot_reader_rejects_wrong_target_evaluate_response() {
+        let mut transport = FakeTransport::default();
+        let frame = evaluate_response_frame(GridTarget::new(1, 2), b"\x02086d00010300011\x03\x04");
+        assert!(verify_grid_frame_checksum(&frame));
+        transport.queue_read_data(frame);
+
+        let mut reader = TransportRuntimeSlotReader::new(transport).unwrap();
+        let error = reader
+            .evaluate_lua(ResolvedTarget::Explicit(GridTarget::new(0, 0)), "return 1")
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "runtime verification failed: evaluate response came back from dx=1 dy=2 instead of the requested target"
+        );
+    }
 
     #[derive(Default)]
     struct StaticSlotReader {
         slots: BTreeMap<String, RuntimeSlotRead>,
+    }
+
+    fn evaluate_response_frame(source_target: GridTarget, class_block: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0x01, 0x0f];
+        push_ascii_hex(&mut packet, 4, 0);
+        push_ascii_hex(&mut packet, 2, 1);
+        push_ascii_hex(&mut packet, 2, 1);
+        push_ascii_hex(&mut packet, 2, (source_target.dx + 127) as usize);
+        push_ascii_hex(&mut packet, 2, (source_target.dy + 127) as usize);
+        push_ascii_hex(&mut packet, 2, 0);
+        push_ascii_hex(&mut packet, 2, 0);
+        push_ascii_hex(&mut packet, 1, 0);
+        push_ascii_hex(&mut packet, 1, 0);
+        push_ascii_hex(&mut packet, 2, 0);
+        packet.push(0x17);
+        packet.extend_from_slice(class_block);
+
+        let frame_length = packet.len();
+        overwrite_ascii_hex(&mut packet, 2, 4, frame_length);
+
+        let checksum = packet.iter().fold(0u8, |acc, byte| acc ^ byte);
+        push_ascii_hex(&mut packet, 2, checksum as usize);
+        packet.push(0x0a);
+        packet
+    }
+
+    fn push_ascii_hex(buffer: &mut Vec<u8>, width: usize, value: usize) {
+        buffer.extend_from_slice(format!("{value:0width$x}").as_bytes());
+    }
+
+    fn overwrite_ascii_hex(buffer: &mut [u8], offset: usize, width: usize, value: usize) {
+        let text = format!("{value:0width$x}");
+        buffer[offset..offset + width].copy_from_slice(text.as_bytes());
     }
 
     impl StaticSlotReader {

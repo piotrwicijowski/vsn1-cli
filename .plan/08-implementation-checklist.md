@@ -228,3 +228,4 @@ Update this section as work lands.
 3. The manifest-defined layer follow-up is complete for the shipped default runtime; future hardware coverage for persistent-to-persistent base switching will require a runtime that declares multiple persistent layers.
 4. For future work to add optional daemon-backed command execution with per-device warm-port reuse and `5s` idle close, use `12-daemon-capability-plan.md`.
 5. For step-by-step execution of the daemon follow-up, use `13-daemon-implementation-checklist.md`.
+6. For future work to add file-manager-backed runtime provisioning through on-module event files instead of `CONFIG` slot writes, use `15-file-manager-backed-runtime-plan.md`.

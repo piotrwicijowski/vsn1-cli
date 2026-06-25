@@ -1,6 +1,8 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+use std::str;
+
 pub const GRID_BAUD_RATE: u32 = 2_000_000;
 pub const GRID_BROADCAST_COORDINATE: i16 = -127;
 pub const GRID_MAX_LUA_BYTES: usize = 909;
@@ -16,6 +18,7 @@ const GRID_CONST_EOB: u8 = 0x17;
 
 const GRID_CLASS_CONFIG: u16 = 0x060;
 const GRID_CLASS_PAGESTORE: u16 = 0x061;
+const GRID_CLASS_EVALUATE: u16 = 0x086;
 const GRID_CLASS_IMMEDIATE: u16 = 0x085;
 const GRID_CLASS_HEARTBEAT: u16 = 0x010;
 const GRID_CLASS_PAGEACTIVE: u16 = 0x030;
@@ -30,6 +33,13 @@ const GRID_PROTOCOL_VERSION_PATCH: u8 = 0x01;
 const GRID_EDITOR_VERSION_MAJOR: u8 = 0x01;
 const GRID_EDITOR_VERSION_MINOR: u8 = 0x06;
 const GRID_EDITOR_VERSION_PATCH: u8 = 0x05;
+const GRID_INSTR_REPORT: u8 = 0x0d;
+
+const LUA_TNIL: usize = 0;
+const LUA_TBOOLEAN: usize = 1;
+const LUA_TNUMBER: usize = 3;
+const LUA_TSTRING: usize = 4;
+const LUA_TTABLE: usize = 5;
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -82,6 +92,13 @@ pub struct ConfigFetch {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct EvaluateWrite<'a> {
+    pub target: GridTarget,
+    pub lua: &'a str,
+    pub identity: PacketIdentity,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Heartbeat {
     pub identity: PacketIdentity,
 }
@@ -97,6 +114,20 @@ pub struct PageActive {
     pub target: GridTarget,
     pub page: u8,
     pub identity: PacketIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LuaValue {
+    Nil,
+    Boolean(bool),
+    Number(f64),
+    String(String),
+    Table(Vec<(LuaValue, LuaValue)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvaluateDecodeError {
+    MalformedResponse { message: String },
 }
 
 impl GridTarget {
@@ -150,6 +181,18 @@ impl fmt::Display for ProtocolError {
 
 impl StdError for ProtocolError {}
 
+impl fmt::Display for EvaluateDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedResponse { message } => {
+                write!(f, "malformed EVALUATE response: {message}")
+            }
+        }
+    }
+}
+
+impl StdError for EvaluateDecodeError {}
+
 fn normalize_lua_body(lua: &str) -> String {
     let trimmed = lua.trim();
 
@@ -181,6 +224,19 @@ pub fn frame_immediate_lua(lua: &str) -> String {
     normalize_lua_body(lua)
 }
 
+fn normalize_evaluate_lua(lua: &str) -> String {
+    let trimmed = lua.trim();
+
+    if let Some(inner) = trimmed
+        .strip_prefix("<?lua")
+        .and_then(|inner| inner.strip_suffix("?>"))
+    {
+        inner.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub fn encode_immediate_packet(write: &ImmediateWrite<'_>) -> Result<Vec<u8>> {
     let framed_lua = frame_immediate_lua(write.lua);
     let script_bytes = encode_script_bytes(&framed_lua)?;
@@ -188,6 +244,24 @@ pub fn encode_immediate_packet(write: &ImmediateWrite<'_>) -> Result<Vec<u8>> {
     let mut class = vec![GRID_CONST_STX];
     write_ascii_hex(&mut class, 3, GRID_CLASS_IMMEDIATE as usize);
     write_ascii_hex(&mut class, 1, GRID_INSTR_EXECUTE as usize);
+    write_ascii_hex(&mut class, 4, script_bytes.len());
+    class.extend_from_slice(&script_bytes);
+    class.push(GRID_CONST_ETX);
+    class.push(GRID_CONST_EOT);
+
+    encode_packet(write.target, write.identity, &class)
+}
+
+pub fn encode_evaluate_packet(write: &EvaluateWrite<'_>) -> Result<Vec<u8>> {
+    let script = normalize_evaluate_lua(write.lua);
+    let script_bytes = encode_unbounded_ascii_bytes(&script);
+
+    let mut class = vec![GRID_CONST_STX];
+    write_ascii_hex(&mut class, 3, GRID_CLASS_EVALUATE as usize);
+    write_ascii_hex(&mut class, 1, GRID_INSTR_EXECUTE as usize);
+    write_ascii_hex(&mut class, 2, 0);
+    write_ascii_hex(&mut class, 2, 1);
+    write_ascii_hex(&mut class, 2, LUA_TSTRING);
     write_ascii_hex(&mut class, 4, script_bytes.len());
     class.extend_from_slice(&script_bytes);
     class.push(GRID_CONST_ETX);
@@ -272,6 +346,50 @@ pub fn encode_page_active_packet(change: &PageActive) -> Result<Vec<u8>> {
     encode_packet(change.target, change.identity, &class)
 }
 
+pub fn parse_evaluate_response(
+    class_block: &[u8],
+) -> std::result::Result<Vec<LuaValue>, EvaluateDecodeError> {
+    let mut raw = class_block;
+    if raw.first() == Some(&GRID_CONST_STX) {
+        raw = &raw[1..];
+    }
+    if raw.last() == Some(&GRID_CONST_ETX) {
+        raw = &raw[..raw.len() - 1];
+    }
+
+    if raw.len() < 8 {
+        return Err(evaluate_decode_error(
+            "response shorter than EVALUATE header",
+        ));
+    }
+
+    if raw.get(0..3) != Some(b"086") {
+        return Err(evaluate_decode_error(
+            "response does not contain EVALUATE class 086",
+        ));
+    }
+
+    let instruction = parse_ascii_hex_slice(&raw[3..4])
+        .ok_or_else(|| evaluate_decode_error("response instruction is not valid ASCII hex"))?;
+    if instruction != GRID_INSTR_REPORT as usize {
+        return Err(evaluate_decode_error(format!(
+            "response instruction {:x} is not EVALUATE report {:x}",
+            instruction, GRID_INSTR_REPORT
+        )));
+    }
+
+    let count = parse_ascii_hex_slice(&raw[6..8])
+        .ok_or_else(|| evaluate_decode_error("response element count is not valid ASCII hex"))?;
+    let (values, final_pos) = parse_evaluate_elements(raw, 8, count)?;
+    if final_pos != raw.len() {
+        return Err(evaluate_decode_error(
+            "response contained trailing bytes after the decoded values",
+        ));
+    }
+
+    Ok(values)
+}
+
 fn encode_packet(
     target: GridTarget,
     identity: PacketIdentity,
@@ -304,11 +422,7 @@ fn encode_packet(
 }
 
 fn encode_script_bytes(script: &str) -> Result<Vec<u8>> {
-    let script_bytes: Vec<u8> = script
-        .chars()
-        .filter(|ch| ch.is_ascii())
-        .map(|ch| ch as u8)
-        .collect();
+    let script_bytes = encode_unbounded_ascii_bytes(script);
 
     if script_bytes.len() >= GRID_MAX_LUA_BYTES {
         return Err(ProtocolError::LuaTooLong {
@@ -318,6 +432,149 @@ fn encode_script_bytes(script: &str) -> Result<Vec<u8>> {
     }
 
     Ok(script_bytes)
+}
+
+fn encode_unbounded_ascii_bytes(script: &str) -> Vec<u8> {
+    script
+        .chars()
+        .filter(|ch| ch.is_ascii())
+        .map(|ch| ch as u8)
+        .collect()
+}
+
+fn parse_evaluate_elements(
+    raw: &[u8],
+    mut pos: usize,
+    count: usize,
+) -> std::result::Result<(Vec<LuaValue>, usize), EvaluateDecodeError> {
+    let mut values = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let type_code = parse_ascii_hex_range_checked(raw, pos, 2, "value type")?;
+        pos += 2;
+
+        if type_code == LUA_TNIL {
+            values.push(LuaValue::Nil);
+            continue;
+        }
+
+        let size = parse_ascii_hex_range_checked(raw, pos, 4, "value size")?;
+        pos += 4;
+
+        match type_code {
+            LUA_TBOOLEAN => {
+                let data = parse_ascii_text_range_checked(raw, pos, size, "boolean payload")?;
+                values.push(LuaValue::Boolean(data == "ff"));
+                pos += size;
+            }
+            LUA_TNUMBER => {
+                let data = parse_ascii_text_range_checked(raw, pos, size, "number payload")?;
+                let number = data.parse::<f64>().map_err(|error| {
+                    evaluate_decode_error(format!(
+                        "number payload `{data}` could not be parsed: {error}"
+                    ))
+                })?;
+                values.push(LuaValue::Number(number));
+                pos += size;
+            }
+            LUA_TSTRING => {
+                let data = parse_ascii_text_range_checked(raw, pos, size, "string payload")?;
+                values.push(LuaValue::String(decode_evaluate_string(&data)?));
+                pos += size;
+            }
+            LUA_TTABLE => {
+                let (pairs, new_pos) = parse_evaluate_elements(raw, pos, size * 2)?;
+                if pairs.len() % 2 != 0 {
+                    return Err(evaluate_decode_error(
+                        "table payload did not decode to an even key/value element count",
+                    ));
+                }
+
+                let mut entries = Vec::with_capacity(size);
+                let mut pair_index = 0;
+                while pair_index < pairs.len() {
+                    entries.push((pairs[pair_index].clone(), pairs[pair_index + 1].clone()));
+                    pair_index += 2;
+                }
+
+                values.push(LuaValue::Table(entries));
+                pos = new_pos;
+            }
+            other => {
+                return Err(evaluate_decode_error(format!(
+                    "unsupported Lua value type {:02x}",
+                    other
+                )));
+            }
+        }
+    }
+
+    Ok((values, pos))
+}
+
+fn parse_ascii_hex_range_checked(
+    raw: &[u8],
+    offset: usize,
+    width: usize,
+    field_name: &str,
+) -> std::result::Result<usize, EvaluateDecodeError> {
+    let slice = raw.get(offset..offset + width).ok_or_else(|| {
+        evaluate_decode_error(format!("{field_name} extends past the end of the response"))
+    })?;
+    parse_ascii_hex_slice(slice)
+        .ok_or_else(|| evaluate_decode_error(format!("{field_name} is not valid ASCII hex")))
+}
+
+fn parse_ascii_hex_slice(slice: &[u8]) -> Option<usize> {
+    let text = str::from_utf8(slice).ok()?;
+    usize::from_str_radix(text, 16).ok()
+}
+
+fn parse_ascii_text_range_checked(
+    raw: &[u8],
+    offset: usize,
+    width: usize,
+    field_name: &str,
+) -> std::result::Result<String, EvaluateDecodeError> {
+    let slice = raw.get(offset..offset + width).ok_or_else(|| {
+        evaluate_decode_error(format!("{field_name} extends past the end of the response"))
+    })?;
+    str::from_utf8(slice)
+        .map(|text| text.to_string())
+        .map_err(|error| evaluate_decode_error(format!("{field_name} is not valid UTF-8: {error}")))
+}
+
+fn decode_evaluate_string(input: &str) -> std::result::Result<String, EvaluateDecodeError> {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' || chars.peek() != Some(&'x') {
+            output.push(ch);
+            continue;
+        }
+
+        chars.next();
+        let hi = chars.next().ok_or_else(|| {
+            evaluate_decode_error("string escape ended before the first hex digit")
+        })?;
+        let lo = chars.next().ok_or_else(|| {
+            evaluate_decode_error("string escape ended before the second hex digit")
+        })?;
+        let escaped = format!("{hi}{lo}");
+        let value = u8::from_str_radix(&escaped, 16).map_err(|error| {
+            evaluate_decode_error(format!("string escape \\x{escaped} is invalid: {error}"))
+        })?;
+        output.push(char::from(value));
+    }
+
+    Ok(output)
+}
+
+fn evaluate_decode_error(message: impl Into<String>) -> EvaluateDecodeError {
+    EvaluateDecodeError::MalformedResponse {
+        message: message.into(),
+    }
 }
 
 fn grid_coordinate_to_wire(axis: &'static str, value: i16) -> Result<usize> {
@@ -407,6 +664,39 @@ mod tests {
     }
 
     #[test]
+    fn encodes_evaluate_packet_with_raw_lua_payload() {
+        let packet = encode_evaluate_packet(&EvaluateWrite {
+            target: GridTarget::new(0, 1),
+            lua: " <?lua return 1 ?> ",
+            identity: PacketIdentity::new(0x11, 0x22),
+        })
+        .unwrap();
+
+        assert_eq!(&packet[14..18], b"7f80");
+        assert_eq!(&packet[23..34], b"\x02086e000104");
+        assert_eq!(evaluate_payload(&packet), b"return 1");
+        assert_eq!(
+            std::str::from_utf8(&packet[34..38]).unwrap(),
+            format!("{:04x}", evaluate_payload(&packet).len())
+        );
+        assert!(packet_has_valid_checksum(&packet));
+    }
+
+    #[test]
+    fn evaluate_packet_is_not_limited_by_grid_config_length() {
+        let script = "a".repeat(GRID_MAX_LUA_BYTES + 50);
+
+        let packet = encode_evaluate_packet(&EvaluateWrite {
+            target: GridTarget::BROADCAST,
+            lua: &script,
+            identity: PacketIdentity::new(1, 1),
+        })
+        .unwrap();
+
+        assert_eq!(evaluate_payload(&packet).len(), script.len());
+    }
+
+    #[test]
     fn encodes_config_packet_with_versioned_header() {
         let packet = encode_config_packet(&ConfigWrite {
             target: GridTarget::new(0, 1),
@@ -430,6 +720,62 @@ mod tests {
             format!("{:04x}", config_payload(&packet).len())
         );
         assert!(packet_has_valid_checksum(&packet));
+    }
+
+    #[test]
+    fn parses_evaluate_response_values_for_all_supported_scalar_types() {
+        let block = b"\x02086d000400010002ff03000442.5040005Z\\x01\x03";
+
+        let values = parse_evaluate_response(block).unwrap();
+
+        assert_eq!(
+            values,
+            vec![
+                LuaValue::Nil,
+                LuaValue::Boolean(true),
+                LuaValue::Number(42.5),
+                LuaValue::String("Z\u{1}".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_evaluate_response_tables_recursively() {
+        let block = b"\x02086d00010500020300011040003foo040003bar0300032.5\x03";
+
+        let values = parse_evaluate_response(block).unwrap();
+
+        assert_eq!(
+            values,
+            vec![LuaValue::Table(vec![
+                (LuaValue::Number(1.0), LuaValue::String("foo".to_string())),
+                (LuaValue::String("bar".to_string()), LuaValue::Number(2.5)),
+            ])]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_evaluate_response() {
+        let error = parse_evaluate_response(b"\x02086d0001040004ab\x03").unwrap_err();
+
+        assert_eq!(
+            error,
+            EvaluateDecodeError::MalformedResponse {
+                message: "string payload extends past the end of the response".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_evaluate_value_type() {
+        let error = parse_evaluate_response(b"\x02086d0001990001x\x03").unwrap_err();
+
+        assert_eq!(
+            error,
+            EvaluateDecodeError::MalformedResponse {
+                message: "unsupported Lua value type 99".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -520,6 +866,10 @@ mod tests {
 
     fn immediate_payload(packet: &[u8]) -> &[u8] {
         &packet[32..packet.len() - 5]
+    }
+
+    fn evaluate_payload(packet: &[u8]) -> &[u8] {
+        &packet[38..packet.len() - 5]
     }
 
     fn config_payload(packet: &[u8]) -> &[u8] {
