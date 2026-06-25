@@ -54,10 +54,20 @@ pub struct DiscoveredRuntime {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeBundleManifest {
+    #[serde(default)]
+    pub provisioning_backend: RuntimeProvisioningBackend,
     pub layers: Vec<RuntimeLayerSpec>,
     pub owned_slots: Vec<OwnedRuntimeSlot>,
     #[serde(default)]
     pub fields: Vec<RuntimeFieldSpec>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeProvisioningBackend {
+    #[default]
+    ConfigSlots,
+    ModuleFiles,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -233,6 +243,13 @@ impl OwnedRuntimeSlot {
             self.page, self.element, self.event
         )
     }
+
+    pub fn derived_module_file_path(&self) -> String {
+        format!(
+            "/{:02x}/{:02x}/{:02x}.lua",
+            self.page, self.element, self.event
+        )
+    }
 }
 
 impl RuntimeSource {
@@ -398,6 +415,20 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
         if !slot_locations.insert((slot.page, slot.element, slot.event)) {
             return Err(RuntimeBundleError::InvalidManifest {
                 message: format!("duplicate owned slot location {}", slot.location_display()),
+            });
+        }
+
+        if manifest.provisioning_backend == RuntimeProvisioningBackend::ModuleFiles
+            && !Path::new(&slot.asset)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
+        {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!(
+                    "module-files provisioning currently supports only runtime-owned .lua event files; slot {} uses asset {}",
+                    slot.name, slot.asset
+                ),
             });
         }
     }
@@ -586,6 +617,10 @@ install_order = 10
         let bundle = RuntimeBundle::bundled().unwrap();
 
         assert_eq!(bundle.root(), bundled_runtime_dir().as_path());
+        assert_eq!(
+            bundle.manifest().provisioning_backend,
+            RuntimeProvisioningBackend::ConfigSlots
+        );
         assert_eq!(bundle.assets().len(), 2);
         assert_eq!(bundle.assets()[0].slot.name, "lcd-init");
         assert_eq!(bundle.assets()[1].slot.name, "lcd-draw");
@@ -660,6 +695,10 @@ install_order = 10
         let bundle =
             RuntimeBundle::load_from_dir(bundled_runtime_root_dir().join("media")).unwrap();
 
+        assert_eq!(
+            bundle.manifest().provisioning_backend,
+            RuntimeProvisioningBackend::ConfigSlots
+        );
         assert_eq!(bundle.assets().len(), 2);
         assert_eq!(
             bundle
@@ -811,6 +850,36 @@ normalized_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         let bundle = RuntimeBundle::load_from_dir(root).unwrap();
 
         assert_eq!(bundle.assets().len(), 1);
+        assert_eq!(
+            bundle.manifest().provisioning_backend,
+            RuntimeProvisioningBackend::ConfigSlots
+        );
+    }
+
+    #[test]
+    fn file_manager_proof_runtime_loads_with_module_files_backend() {
+        let bundle = RuntimeBundle::load_from_dir(
+            bundled_runtime_root_dir().join("default-file-manager-poc"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            bundle.manifest().provisioning_backend,
+            RuntimeProvisioningBackend::ModuleFiles
+        );
+        assert_eq!(
+            bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.derived_module_file_path())
+                .collect::<Vec<_>>(),
+            vec!["/00/0d/00.lua", "/00/0d/08.lua"]
+        );
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "fast.action"));
     }
 
     #[test]
@@ -860,6 +929,73 @@ notes = "fixture"
         assert_eq!(
             error.to_string(),
             "invalid runtime manifest: duplicate field inventory entry persistent.title"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_provisioning_backend_names() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+provisioning_backend = "definitely-not-valid"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("unknown variant `definitely-not-valid`"));
+    }
+
+    #[test]
+    fn rejects_non_lua_assets_for_module_files_backend() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.txt"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+provisioning_backend = "module-files"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.txt"
+install_order = 10
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: module-files provisioning currently supports only runtime-owned .lua event files; slot lcd-init uses asset lcd-init.txt"
         );
     }
 

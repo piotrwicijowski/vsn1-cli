@@ -1,0 +1,141 @@
+provisioning_backend = "module-files"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+notes = "Primary long-lived content layer."
+
+[[layers]]
+name = "slow"
+priority = 10
+activation = "temporary"
+timeout_ms = 5000
+notes = "Medium-priority notification layer."
+
+[[layers]]
+name = "fast"
+priority = 20
+activation = "temporary"
+timeout_ms = 1000
+notes = "High-priority transient reaction layer."
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+
+[[owned_slots]]
+name = "lcd-draw"
+page = 0
+element = 13
+event = 8
+asset = "lcd-draw.lua"
+install_order = 20
+
+[[fields]]
+name = "persistent.title"
+layer = "persistent"
+value_kind = "text"
+runtime_key = "t"
+clear_value = ""
+notes = "Primary label carried by the validated update_param(...) title argument."
+
+[[fields]]
+name = "persistent.bottom"
+layer = "persistent"
+value_kind = "text"
+runtime_key = "b"
+clear_value = ""
+notes = "Bottom-line text carried by the validated update_param(...) bottom_text argument."
+
+[[fields]]
+name = "persistent.value"
+layer = "persistent"
+value_kind = "int"
+runtime_key = "v"
+clear_value = 0
+notes = "Current normalized value carried by update_param(...)."
+
+[[fields]]
+name = "persistent.min"
+layer = "persistent"
+value_kind = "int"
+runtime_key = "n"
+clear_value = 0
+notes = "Normalized minimum carried by update_param(...)."
+
+[[fields]]
+name = "persistent.max"
+layer = "persistent"
+value_kind = "int"
+runtime_key = "x"
+clear_value = 127
+notes = "Normalized maximum carried by update_param(...)."
+
+[[fields]]
+name = "persistent.default"
+layer = "persistent"
+value_kind = "int"
+runtime_key = "d"
+clear_value = -1
+notes = "Normalized default marker carried by update_param(...)."
+
+[[fields]]
+name = "persistent.step"
+layer = "persistent"
+value_kind = "int"
+runtime_key = "s"
+clear_value = 0
+notes = "Step indicator carried by update_param(...)."
+
+[[fields]]
+name = "persistent.info"
+layer = "persistent"
+value_kind = "text_list"
+runtime_key = "i"
+clear_value = ["---", "---", "---", "---", "---", "---", "---", "---"]
+notes = "Eight slot labels carried by update_param(...)."
+
+[[fields]]
+name = "persistent.clamp_min"
+layer = "persistent"
+value_kind = "bool"
+runtime_key = "l"
+clear_value = false
+notes = "Lower clamp state carried by update_param(...)."
+
+[[fields]]
+name = "persistent.clamp_max"
+layer = "persistent"
+value_kind = "bool"
+runtime_key = "h"
+clear_value = false
+notes = "Upper clamp state carried by update_param(...)."
+
+[[fields]]
+name = "persistent.bank"
+layer = "persistent"
+value_kind = "int"
+runtime_key = "k"
+clear_value = 0
+notes = "Bank index carried by update_param(...)."
+
+[[fields]]
+name = "slow.message"
+layer = "slow"
+value_kind = "text"
+runtime_key = "m"
+clear_value = ""
+notes = "Temporary 5s overlay message from the layered screen plan."
+
+[[fields]]
+name = "fast.action"
+layer = "fast"
+value_kind = "text"
+runtime_key = "a"
+clear_value = ""
+notes = "Temporary 1s overlay action text from the layered screen plan."

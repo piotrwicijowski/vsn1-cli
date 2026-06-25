@@ -36,10 +36,7 @@ pub(crate) fn derive_owned_slot_module_file_path(slot: &OwnedRuntimeSlot) -> Res
         )));
     }
 
-    Ok(format!(
-        "/{:02x}/{:02x}/{:02x}.lua",
-        slot.page, slot.element, slot.event
-    ))
+    Ok(slot.derived_module_file_path())
 }
 
 pub(crate) fn read_owned_slot_module_file<E>(

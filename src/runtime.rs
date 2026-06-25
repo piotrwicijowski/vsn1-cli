@@ -13,7 +13,7 @@ use crate::protocol::{
 };
 use crate::runtime_bundle::{
     normalize_text_content, normalized_sha256, OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle,
-    RuntimeBundleError, RuntimeLayerSpec,
+    RuntimeBundleError, RuntimeLayerSpec, RuntimeProvisioningBackend,
 };
 use crate::targeting::ResolvedTarget;
 use crate::transport::{SerialTransport, TransportError};
@@ -122,6 +122,8 @@ pub struct RuntimeEvaluateReport {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct StoredRuntimeManifest {
+    #[serde(default)]
+    provisioning_backend: RuntimeProvisioningBackend,
     layers: Vec<RuntimeLayerSpec>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     owned_slots: Vec<StoredOwnedRuntimeSlot>,
@@ -920,6 +922,7 @@ where
     }
 
     let manifest = StoredRuntimeManifest {
+        provisioning_backend: bundle.manifest().provisioning_backend,
         layers: bundle.manifest().layers.clone(),
         owned_slots: bundle
             .assets()

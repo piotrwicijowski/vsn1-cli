@@ -15,10 +15,10 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 - Overall status: `in_progress`
 - Last completed step: `step 21`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-25 after adding the file-manager follow-up Step 2 internal module-files helper with chunked evaluate-driven read/write/clear helpers and regression tests)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-25 after adding the file-manager follow-up Step 3 runtime manifest provisioning_backend support, the default-file-manager-poc proof runtime, and backend regression coverage)`
 - Last hardware validation: `2026-06-21 on Linux host: step 21 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default, runtime verify, and runtime status all reported exact-match compatible on installed runtime 2026-06-21-manifest-layers.1; screen set/activate validation confirmed persistent activation acceptance, slow/fast activation, fast-over-slow temporary priority, fallback from fast to slow to persistent, slow and fast timer restart behavior, lower-layer non-preemption while a higher layer remained active, and successful screen clear fallback for slow and fast.`
-- Open blockers: `hardware validation remains pending for the file-manager follow-up Step 1/Step 2 gates`
-- Next session start point: `main implementation plan remains complete through step 21; for the file-manager follow-up, the Step 2 code items are now implemented, both hardware gates still remain, and the next code step is Step 3 in 15-file-manager-backed-runtime-plan.md to add provisioning_backend manifest support plus a proof runtime`
+- Open blockers: `hardware validation remains pending for the file-manager follow-up Step 1/Step 2 gates, and Step 4 hardware validation will remain pending once backend integration lands`
+- Next session start point: `main implementation plan remains complete through step 21; for the file-manager follow-up, Steps 2 and 3 code items are now implemented, the Step 1/Step 2 hardware gates still remain, and the next code step is Step 4 in 15-file-manager-backed-runtime-plan.md to route install/upgrade and pre-install backup flows through the selected provisioning backend`
 
 ## Rules for every step
 

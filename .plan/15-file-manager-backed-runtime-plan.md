@@ -345,10 +345,10 @@ Use this as the execution order if implementation begins.
 
 ### Step 3: Extend runtime manifests with backend selection
 
-- [ ] Add `provisioning_backend` parsing and validation.
-- [ ] Default omitted backend to `config-slots`.
-- [ ] Add a new file-backed proof runtime directory.
-- [ ] Add manifest regression tests for valid and invalid backend values.
+- [x] Add `provisioning_backend` parsing and validation.
+- [x] Default omitted backend to `config-slots`.
+- [x] Add a new file-backed proof runtime directory.
+- [x] Add manifest regression tests for valid and invalid backend values.
 
 ### Step 4: Integrate backend selection into runtime install/upgrade
 
