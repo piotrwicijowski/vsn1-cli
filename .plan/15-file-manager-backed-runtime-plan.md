@@ -368,9 +368,9 @@ Use this as the execution order if implementation begins.
 
 ### Step 6: Integrate backend selection into remove/uninstall
 
-- [ ] Restore pre-install file contents through the selected backend when backup exists.
-- [ ] Define and implement fallback clear behavior when no backup exists.
-- [ ] Add tests for restore and fallback-clear behavior.
+- [x] Restore pre-install file contents through the selected backend when backup exists.
+- [x] Define and implement fallback clear behavior when no backup exists.
+- [x] Add tests for restore and fallback-clear behavior.
 - [ ] Hardware gate: confirm uninstall restores prior state or performs the documented fallback.
 
 ### Step 7: Run parity validation against the proven slot-backed runtime

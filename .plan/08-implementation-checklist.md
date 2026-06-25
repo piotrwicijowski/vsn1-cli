@@ -14,11 +14,11 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 
 - Overall status: `in_progress`
 - Last completed step: `step 21`
-- In-progress step: `file-manager follow-up step 5`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-25 after marking Step 4 software items complete in the file-manager plan and adding module-files verify/status/repair regression coverage for exact-match, drift, missing-file, and repair behavior)`
+- In-progress step: `file-manager follow-up step 6`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-25 after marking Step 6 software items complete in the file-manager plan and adding module-files remove/uninstall regression coverage for backup-restore and fallback-delete behavior)`
 - Last hardware validation: `2026-06-21 on Linux host: step 21 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default, runtime verify, and runtime status all reported exact-match compatible on installed runtime 2026-06-21-manifest-layers.1; screen set/activate validation confirmed persistent activation acceptance, slow/fast activation, fast-over-slow temporary priority, fallback from fast to slow to persistent, slow and fast timer restart behavior, lower-layer non-preemption while a higher layer remained active, and successful screen clear fallback for slow and fast.`
-- Open blockers: `hardware validation remains pending for the file-manager follow-up Step 1/Step 2 gates, plus the Step 4 and Step 5 hardware validations for file-backed install and drift-detection/repair behavior`
-- Next session start point: `main implementation plan remains complete through step 21; for the file-manager follow-up, Step 4 and Step 5 software items are now implemented, their hardware gates still remain, and the next code step is Step 6 in 15-file-manager-backed-runtime-plan.md to route remove/uninstall restore and fallback clear behavior through the selected provisioning backend`
+- Open blockers: `hardware validation remains pending for the file-manager follow-up Step 1/Step 2 gates, plus the Step 4, Step 5, and Step 6 hardware validations for file-backed install, drift-detection/repair, and remove/uninstall behavior`
+- Next session start point: `main implementation plan remains complete through step 21; for the file-manager follow-up, Step 6 software items are now implemented, its hardware gate still remains, and the next code step after that validation is Step 7 in 15-file-manager-backed-runtime-plan.md for slot-backed vs file-backed behavior parity coverage`
 
 ## Rules for every step
 

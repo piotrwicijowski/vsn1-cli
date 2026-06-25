@@ -2916,4 +2916,117 @@ install_order = 10
             .all(|slot| normalized_sha256(&slot.content)
                 == normalized_sha256(&expected_config_slot_readback(""))));
     }
+
+    #[test]
+    fn module_file_remove_restores_pre_install_backup_when_available() {
+        let fixture = tempdir().unwrap();
+        write_runtime_bundle_dir_with_backend(
+            &installed_runtime_dir_from_root(fixture.path()),
+            "return 'installed draw'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        write_runtime_bundle_dir_with_backend(
+            &pre_install_runtime_dir_from_root(fixture.path()),
+            "return 'backup draw'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        let bundle =
+            RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(fixture.path())).unwrap();
+        let backup_bundle =
+            RuntimeBundle::load_from_dir(pre_install_runtime_dir_from_root(fixture.path()))
+                .unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        for asset in bundle.assets() {
+            accessor.module_files.insert(
+                asset.slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content: asset.normalized_content.clone(),
+                },
+            );
+        }
+
+        let report = remove_installed_runtime_with_storage(
+            fixture.path(),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            accessor.write_order(),
+            &backup_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(accessor.clear_order().is_empty());
+        assert!(accessor.stored_pages().is_empty());
+        assert_eq!(report.removed_slots().len(), bundle.assets().len());
+        assert!(report.restored_from_backup());
+        assert_eq!(report.warning(), None);
+        assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
+        assert_eq!(
+            accessor.module_files["lcd-draw"].content,
+            backup_bundle
+                .assets()
+                .iter()
+                .find(|asset| asset.slot.name == "lcd-draw")
+                .unwrap()
+                .normalized_content
+        );
+    }
+
+    #[test]
+    fn module_file_remove_deletes_owned_files_with_warning_when_backup_is_missing() {
+        let fixture = tempdir().unwrap();
+        write_runtime_bundle_dir_with_backend(
+            &installed_runtime_dir_from_root(fixture.path()),
+            "return 'installed draw'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        let bundle =
+            RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(fixture.path())).unwrap();
+        let mut accessor = RecordingSlotAccessor::default();
+
+        for asset in bundle.assets() {
+            accessor.module_files.insert(
+                asset.slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content: asset.normalized_content.clone(),
+                },
+            );
+        }
+
+        let report = remove_installed_runtime_with_storage(
+            fixture.path(),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+
+        assert!(!report.restored_from_backup());
+        assert!(report
+            .warning()
+            .unwrap()
+            .contains("pre-install backup was unavailable or incomplete"));
+        assert_eq!(
+            accessor.clear_order(),
+            &bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(accessor.write_order().is_empty());
+        assert!(accessor.stored_pages().is_empty());
+        assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
+        assert!(accessor.module_files.is_empty());
+    }
 }
