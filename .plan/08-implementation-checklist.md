@@ -15,10 +15,10 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 - Overall status: `in_progress`
 - Last completed step: `step 21`
 - In-progress step: `none`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check`, `cargo check --target x86_64-apple-darwin`, `cargo check --target aarch64-apple-darwin` (pass on 2026-06-21 after step 21 updated README/help text for runtime-defined layer names, replaced the stale raw-helper examples with the generic helper contract, and confirmed Linux plus both macOS target triples still build cleanly)`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-25 after adding the file-manager follow-up Step 2 internal module-files helper with chunked evaluate-driven read/write/clear helpers and regression tests)`
 - Last hardware validation: `2026-06-21 on Linux host: step 21 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default, runtime verify, and runtime status all reported exact-match compatible on installed runtime 2026-06-21-manifest-layers.1; screen set/activate validation confirmed persistent activation acceptance, slow/fast activation, fast-over-slow temporary priority, fallback from fast to slow to persistent, slow and fast timer restart behavior, lower-layer non-preemption while a higher layer remained active, and successful screen clear fallback for slow and fast.`
-- Open blockers: `none`
-- Next session start point: `manifest-defined layer follow-up step 21 is complete; if future validation needs explicit persistent-to-persistent base switching coverage, use a runtime that declares multiple persistent layers, otherwise continue from the next item in the main implementation plan`
+- Open blockers: `hardware validation remains pending for the file-manager follow-up Step 1/Step 2 gates`
+- Next session start point: `main implementation plan remains complete through step 21; for the file-manager follow-up, the Step 2 code items are now implemented, both hardware gates still remain, and the next code step is Step 3 in 15-file-manager-backed-runtime-plan.md to add provisioning_backend manifest support plus a proof runtime`
 
 ## Rules for every step
 

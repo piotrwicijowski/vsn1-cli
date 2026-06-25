@@ -337,10 +337,10 @@ Use this as the execution order if implementation begins.
 
 ### Step 2: Add an internal module-files helper
 
-- [ ] Implement chunked file read for targeted module paths.
-- [ ] Implement chunked temp-file write plus rename.
-- [ ] Implement fixed-path clear/delete semantics for runtime-owned files.
-- [ ] Add tests for path derivation and chunking helpers.
+- [x] Implement chunked file read for targeted module paths.
+- [x] Implement chunked temp-file write plus rename.
+- [x] Implement fixed-path clear/delete semantics for runtime-owned files.
+- [x] Add tests for path derivation and chunking helpers.
 - [ ] Hardware gate: confirm read/write of `/00/0d/00.lua` and `/00/0d/08.lua`.
 
 ### Step 3: Extend runtime manifests with backend selection

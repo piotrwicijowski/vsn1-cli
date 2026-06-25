@@ -8,6 +8,7 @@ pub mod daemon_socket;
 mod debug;
 pub mod device;
 mod error;
+mod module_files;
 pub mod protocol;
 pub mod raw;
 pub mod runtime;
