@@ -7,6 +7,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::module_files::{
+    clear_owned_slot_module_file, read_owned_slot_module_file, write_owned_slot_module_file_atomic,
+};
 use crate::protocol::{
     self, ConfigFetch, ConfigLocation, ConfigWrite, EvaluateWrite, GridTarget, Heartbeat, LuaValue,
     PacketIdentity, PageActive, PageStore, ProtocolError,
@@ -73,6 +76,26 @@ pub trait RuntimePageStorer {
 
 pub trait RuntimeSlotClearer {
     fn clear_owned_slot(&mut self, target: ResolvedTarget, slot: &OwnedRuntimeSlot) -> Result<()>;
+}
+
+pub trait RuntimeModuleFileAccessor {
+    fn read_owned_module_file(
+        &mut self,
+        target: ResolvedTarget,
+        slot: &OwnedRuntimeSlot,
+    ) -> Result<Option<RuntimeSlotRead>>;
+
+    fn write_owned_module_file(
+        &mut self,
+        target: ResolvedTarget,
+        asset: &RuntimeAsset,
+    ) -> Result<()>;
+
+    fn clear_owned_module_file(
+        &mut self,
+        target: ResolvedTarget,
+        slot: &OwnedRuntimeSlot,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,12 +532,41 @@ where
     }
 }
 
+impl<T> RuntimeModuleFileAccessor for TransportRuntimeSlotReader<T>
+where
+    T: SerialTransport,
+{
+    fn read_owned_module_file(
+        &mut self,
+        target: ResolvedTarget,
+        slot: &OwnedRuntimeSlot,
+    ) -> Result<Option<RuntimeSlotRead>> {
+        read_owned_slot_module_file(self, target, slot)
+    }
+
+    fn write_owned_module_file(
+        &mut self,
+        target: ResolvedTarget,
+        asset: &RuntimeAsset,
+    ) -> Result<()> {
+        write_owned_slot_module_file_atomic(self, target, &asset.slot, &asset.normalized_content)
+    }
+
+    fn clear_owned_module_file(
+        &mut self,
+        target: ResolvedTarget,
+        slot: &OwnedRuntimeSlot,
+    ) -> Result<()> {
+        clear_owned_slot_module_file(self, target, slot)
+    }
+}
+
 pub fn inspect_bundled_runtime<R>(
     requested_target: ResolvedTarget,
     reader: &mut R,
 ) -> Result<RuntimeInspectionReport>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     inspect_runtime_with_bundle_dir(
         crate::runtime_bundle::bundled_runtime_dir(),
@@ -529,7 +581,7 @@ pub fn inspect_runtime_with_bundle_dir<R>(
     reader: &mut R,
 ) -> Result<RuntimeInspectionReport>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
     inspect_runtime_bundle(&bundle, requested_target, reader)
@@ -540,7 +592,7 @@ pub fn inspect_installed_runtime<R>(
     reader: &mut R,
 ) -> Result<Option<RuntimeInspectionReport>>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     inspect_runtime_with_optional_bundle_dir(
         installed_runtime_dir().as_deref(),
@@ -554,7 +606,7 @@ pub fn verify_bundled_runtime<R>(
     reader: &mut R,
 ) -> Result<RuntimeInspectionReport>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     verify_runtime_with_bundle_dir(
         crate::runtime_bundle::bundled_runtime_dir(),
@@ -569,7 +621,7 @@ pub fn verify_runtime_with_bundle_dir<R>(
     reader: &mut R,
 ) -> Result<RuntimeInspectionReport>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     let report = inspect_runtime_with_bundle_dir(bundle_dir, requested_target, reader)?;
 
@@ -588,7 +640,7 @@ pub fn verify_installed_runtime<R>(
     reader: &mut R,
 ) -> Result<RuntimeInspectionReport>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     verify_runtime_with_optional_bundle_dir(
         installed_runtime_dir().as_deref(),
@@ -603,7 +655,7 @@ fn inspect_runtime_with_optional_bundle_dir<R>(
     reader: &mut R,
 ) -> Result<Option<RuntimeInspectionReport>>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     let Some(bundle_dir) = bundle_dir.filter(|path| path.is_dir()) else {
         return Ok(None);
@@ -619,7 +671,7 @@ fn verify_runtime_with_optional_bundle_dir<R>(
     reader: &mut R,
 ) -> Result<RuntimeInspectionReport>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     let Some(report) =
         inspect_runtime_with_optional_bundle_dir(bundle_dir, requested_target, reader)?
@@ -647,7 +699,7 @@ fn install_runtime_bundle_with_storage<R>(
     capture_pre_install: bool,
 ) -> Result<RuntimeInstallReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     if capture_pre_install {
         write_pre_install_bundle(storage_root, bundle, requested_target, reader)?;
@@ -667,7 +719,7 @@ pub fn install_runtime_with_bundle_dir<R>(
     reader: &mut R,
 ) -> Result<RuntimeInstallReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
     let storage_root = required_runtime_config_root_dir()?;
@@ -681,7 +733,7 @@ pub fn upgrade_runtime_with_bundle_dir<R>(
     reader: &mut R,
 ) -> Result<RuntimeUpgradeReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
     let storage_root = required_runtime_config_root_dir()?;
@@ -701,7 +753,7 @@ pub fn repair_installed_runtime<R>(
     reader: &mut R,
 ) -> Result<RuntimeInstallReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     let storage_root = required_runtime_config_root_dir()?;
     repair_installed_runtime_with_storage(&storage_root, requested_target, reader)
@@ -713,7 +765,7 @@ fn repair_installed_runtime_with_storage<R>(
     reader: &mut R,
 ) -> Result<RuntimeInstallReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     let installed_dir = installed_runtime_dir_from_root(storage_root);
     if !installed_dir.is_dir() {
@@ -748,7 +800,11 @@ pub fn remove_installed_runtime<R>(
     reader: &mut R,
 ) -> Result<RuntimeRemoveReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer + RuntimeSlotWriter,
+    R: RuntimeSlotReader
+        + RuntimeSlotClearer
+        + RuntimePageStorer
+        + RuntimeSlotWriter
+        + RuntimeModuleFileAccessor,
 {
     let storage_root = required_runtime_config_root_dir()?;
     remove_installed_runtime_with_storage(&storage_root, requested_target, reader)
@@ -760,7 +816,11 @@ fn remove_installed_runtime_with_storage<R>(
     reader: &mut R,
 ) -> Result<RuntimeRemoveReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer + RuntimeSlotWriter,
+    R: RuntimeSlotReader
+        + RuntimeSlotClearer
+        + RuntimePageStorer
+        + RuntimeSlotWriter
+        + RuntimeModuleFileAccessor,
 {
     let installed_dir = installed_runtime_dir_from_root(storage_root);
     let pre_install_dir = pre_install_runtime_dir_from_root(storage_root);
@@ -797,20 +857,24 @@ fn install_runtime_bundle<R>(
     reader: &mut R,
 ) -> Result<RuntimeInstallReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     let mut stored_pages = Vec::new();
+    let provisioning_backend = bundle.manifest().provisioning_backend;
 
     for asset in bundle.assets() {
         if !stored_pages.contains(&asset.slot.page) {
             stored_pages.push(asset.slot.page);
         }
-        reader.write_owned_slot(requested_target, asset)?;
+        write_runtime_asset(provisioning_backend, requested_target, asset, reader)?;
     }
 
-    for page in stored_pages {
-        reader.store_page(requested_target, page)?;
-    }
+    store_runtime_pages(
+        provisioning_backend,
+        requested_target,
+        &stored_pages,
+        reader,
+    )?;
 
     let verification_report = inspect_runtime_bundle(&bundle, requested_target, reader)?;
     if !verification_report.is_exact_match() {
@@ -836,7 +900,7 @@ fn restore_runtime_bundle<R>(
     reader: &mut R,
 ) -> Result<RuntimeRemoveReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     let report = install_runtime_bundle(bundle, requested_target, reader)?;
 
@@ -854,7 +918,7 @@ fn clear_installed_runtime_with_warning<R>(
     warning: &str,
 ) -> Result<RuntimeRemoveReport>
 where
-    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer,
+    R: RuntimeSlotReader + RuntimeSlotClearer + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
     if !installed_dir.is_dir() {
         return Err(RuntimeError::verification_failed(
@@ -863,25 +927,34 @@ where
     }
 
     let bundle = RuntimeBundle::load_from_dir(installed_dir)?;
+    let provisioning_backend = bundle.manifest().provisioning_backend;
     let mut stored_pages = Vec::new();
 
     for asset in bundle.assets() {
         if !stored_pages.contains(&asset.slot.page) {
             stored_pages.push(asset.slot.page);
         }
-        reader.clear_owned_slot(requested_target, &asset.slot)?;
+        clear_runtime_slot(provisioning_backend, requested_target, &asset.slot, reader)?;
     }
 
-    for page in stored_pages {
-        reader.store_page(requested_target, page)?;
-    }
+    store_runtime_pages(
+        provisioning_backend,
+        requested_target,
+        &stored_pages,
+        reader,
+    )?;
 
     let removed_slots = bundle
         .assets()
         .iter()
         .map(|asset| asset.slot.clone())
         .collect::<Vec<_>>();
-    verify_removed_slots(requested_target, &removed_slots, reader)?;
+    verify_removed_slots(
+        provisioning_backend,
+        requested_target,
+        &removed_slots,
+        reader,
+    )?;
 
     Ok(RuntimeRemoveReport {
         removed_slots,
@@ -897,7 +970,7 @@ fn write_pre_install_bundle<R>(
     reader: &mut R,
 ) -> Result<()>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     let backup_dir = pre_install_runtime_dir_from_root(storage_root);
     let staging_dir = staging_dir_for(&backup_dir);
@@ -911,7 +984,12 @@ where
     })?;
 
     for asset in bundle.assets() {
-        let content = read_slot_content_for_backup(requested_target, &asset.slot, reader)?;
+        let content = read_slot_content_for_backup(
+            bundle.manifest().provisioning_backend,
+            requested_target,
+            &asset.slot,
+            reader,
+        )?;
         let asset_path = staging_dir.join(&asset.slot.asset);
         fs::write(&asset_path, content).map_err(|error| {
             RuntimeError::host_storage(format!(
@@ -958,14 +1036,16 @@ where
 }
 
 fn read_slot_content_for_backup<R>(
+    provisioning_backend: RuntimeProvisioningBackend,
     requested_target: ResolvedTarget,
     slot: &OwnedRuntimeSlot,
     reader: &mut R,
 ) -> Result<String>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
-    let Some(read) = reader.read_owned_slot(requested_target, slot)? else {
+    let Some(read) = read_runtime_asset(provisioning_backend, requested_target, slot, reader)?
+    else {
         return Ok(String::new());
     };
 
@@ -1069,17 +1149,21 @@ fn staging_dir_for(path: &Path) -> PathBuf {
 }
 
 fn verify_removed_slots<R>(
+    provisioning_backend: RuntimeProvisioningBackend,
     requested_target: ResolvedTarget,
     removed_slots: &[OwnedRuntimeSlot],
     reader: &mut R,
 ) -> Result<()>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
-    let cleared_slot_sha256 = normalized_sha256(&expected_config_slot_readback(""));
+    let cleared_slot_sha256 =
+        normalized_sha256(&expected_runtime_readback(provisioning_backend, ""));
 
     for slot in removed_slots {
-        if let Some(read) = reader.read_owned_slot(requested_target, slot)? {
+        if let Some(read) =
+            read_runtime_asset(provisioning_backend, requested_target, slot, reader)?
+        {
             if let ResolvedTarget::Explicit(expected_target) = requested_target {
                 if read.source_target != expected_target {
                     return Err(RuntimeError::verification_failed(format!(
@@ -1115,13 +1199,14 @@ fn inspect_runtime_bundle<R>(
     reader: &mut R,
 ) -> Result<RuntimeInspectionReport>
 where
-    R: RuntimeSlotReader,
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     let mut slot_inspections = Vec::with_capacity(bundle.assets().len());
     let mut observed_targets = Vec::new();
+    let provisioning_backend = bundle.manifest().provisioning_backend;
 
     for asset in bundle.assets() {
-        let read = reader.read_owned_slot(requested_target, &asset.slot)?;
+        let read = read_runtime_asset(provisioning_backend, requested_target, &asset.slot, reader)?;
 
         let status = match read {
             None => RuntimeSlotStatus::Missing,
@@ -1136,8 +1221,10 @@ where
                     }
                     _ => {
                         let actual_content = normalize_text_content(&read.content);
-                        let expected_content =
-                            expected_config_slot_readback(&asset.normalized_content);
+                        let expected_content = expected_runtime_readback(
+                            provisioning_backend,
+                            &asset.normalized_content,
+                        );
 
                         if actual_content == expected_content {
                             RuntimeSlotStatus::Match {
@@ -1164,6 +1251,75 @@ where
         observed_targets,
         slot_inspections,
     })
+}
+
+fn read_runtime_asset<R>(
+    provisioning_backend: RuntimeProvisioningBackend,
+    requested_target: ResolvedTarget,
+    slot: &OwnedRuntimeSlot,
+    reader: &mut R,
+) -> Result<Option<RuntimeSlotRead>>
+where
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
+{
+    match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => reader.read_owned_slot(requested_target, slot),
+        RuntimeProvisioningBackend::ModuleFiles => {
+            reader.read_owned_module_file(requested_target, slot)
+        }
+    }
+}
+
+fn write_runtime_asset<R>(
+    provisioning_backend: RuntimeProvisioningBackend,
+    requested_target: ResolvedTarget,
+    asset: &RuntimeAsset,
+    reader: &mut R,
+) -> Result<()>
+where
+    R: RuntimeSlotWriter + RuntimeModuleFileAccessor,
+{
+    match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => reader.write_owned_slot(requested_target, asset),
+        RuntimeProvisioningBackend::ModuleFiles => {
+            reader.write_owned_module_file(requested_target, asset)
+        }
+    }
+}
+
+fn clear_runtime_slot<R>(
+    provisioning_backend: RuntimeProvisioningBackend,
+    requested_target: ResolvedTarget,
+    slot: &OwnedRuntimeSlot,
+    reader: &mut R,
+) -> Result<()>
+where
+    R: RuntimeSlotClearer + RuntimeModuleFileAccessor,
+{
+    match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => reader.clear_owned_slot(requested_target, slot),
+        RuntimeProvisioningBackend::ModuleFiles => {
+            reader.clear_owned_module_file(requested_target, slot)
+        }
+    }
+}
+
+fn store_runtime_pages<R>(
+    provisioning_backend: RuntimeProvisioningBackend,
+    requested_target: ResolvedTarget,
+    pages: &[u8],
+    reader: &mut R,
+) -> Result<()>
+where
+    R: RuntimePageStorer,
+{
+    if provisioning_backend == RuntimeProvisioningBackend::ConfigSlots {
+        for page in pages {
+            reader.store_page(requested_target, *page)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn read_transport_until_idle(
@@ -1475,6 +1631,16 @@ fn expected_config_slot_readback(content: &str) -> String {
     normalize_text_content(&protocol::frame_immediate_lua(content))
 }
 
+fn expected_runtime_readback(
+    provisioning_backend: RuntimeProvisioningBackend,
+    content: &str,
+) -> String {
+    match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => expected_config_slot_readback(content),
+        RuntimeProvisioningBackend::ModuleFiles => normalize_text_content(content),
+    }
+}
+
 fn push_unique_target(targets: &mut Vec<GridTarget>, target: GridTarget) {
     if !targets.iter().any(|existing| existing == &target) {
         targets.push(target);
@@ -1640,12 +1806,43 @@ mod tests {
         }
     }
 
+    impl RuntimeModuleFileAccessor for StaticSlotReader {
+        fn read_owned_module_file(
+            &mut self,
+            _target: ResolvedTarget,
+            slot: &OwnedRuntimeSlot,
+        ) -> Result<Option<RuntimeSlotRead>> {
+            Ok(self.slots.get(&slot.name).cloned())
+        }
+
+        fn write_owned_module_file(
+            &mut self,
+            _target: ResolvedTarget,
+            _asset: &RuntimeAsset,
+        ) -> Result<()> {
+            Err(RuntimeError::unexpected_response(
+                "static test reader does not support module-file writes",
+            ))
+        }
+
+        fn clear_owned_module_file(
+            &mut self,
+            _target: ResolvedTarget,
+            _slot: &OwnedRuntimeSlot,
+        ) -> Result<()> {
+            Err(RuntimeError::unexpected_response(
+                "static test reader does not support module-file clears",
+            ))
+        }
+    }
+
     #[derive(Default)]
     struct RecordingSlotAccessor {
         writes: Vec<String>,
         clears: Vec<String>,
         stored_pages: Vec<u8>,
         slots: BTreeMap<String, RuntimeSlotRead>,
+        module_files: BTreeMap<String, RuntimeSlotRead>,
         persist_writes: bool,
         drifted_slot: Option<String>,
         reject_page_store: bool,
@@ -1738,12 +1935,83 @@ mod tests {
         }
     }
 
+    impl RuntimeModuleFileAccessor for RecordingSlotAccessor {
+        fn read_owned_module_file(
+            &mut self,
+            _target: ResolvedTarget,
+            slot: &OwnedRuntimeSlot,
+        ) -> Result<Option<RuntimeSlotRead>> {
+            Ok(self.module_files.get(&slot.name).cloned())
+        }
+
+        fn write_owned_module_file(
+            &mut self,
+            target: ResolvedTarget,
+            asset: &RuntimeAsset,
+        ) -> Result<()> {
+            self.writes.push(asset.slot.name.clone());
+
+            if self.persist_writes {
+                let source_target = match target {
+                    ResolvedTarget::Broadcast => GridTarget::new(0, 0),
+                    ResolvedTarget::Explicit(target) => target,
+                };
+                let content = if self.drifted_slot.as_deref() == Some(asset.slot.name.as_str()) {
+                    normalize_text_content(&format!(
+                        "{}\n-- drifted after install\n",
+                        asset.slot.name
+                    ))
+                } else {
+                    asset.normalized_content.clone()
+                };
+
+                self.module_files.insert(
+                    asset.slot.name.clone(),
+                    RuntimeSlotRead {
+                        source_target,
+                        content,
+                    },
+                );
+            }
+
+            Ok(())
+        }
+
+        fn clear_owned_module_file(
+            &mut self,
+            _target: ResolvedTarget,
+            slot: &OwnedRuntimeSlot,
+        ) -> Result<()> {
+            self.clears.push(slot.name.clone());
+            self.module_files.remove(&slot.name);
+            Ok(())
+        }
+    }
+
     fn read_backup_bundle(root: &Path) -> RuntimeBundle {
         RuntimeBundle::load_from_dir(pre_install_runtime_dir_from_root(root)).unwrap()
     }
 
     fn write_runtime_bundle_dir(runtime_root: &Path, draw_content: &str) {
+        write_runtime_bundle_dir_with_backend(
+            runtime_root,
+            draw_content,
+            RuntimeProvisioningBackend::ConfigSlots,
+        );
+    }
+
+    fn write_runtime_bundle_dir_with_backend(
+        runtime_root: &Path,
+        draw_content: &str,
+        provisioning_backend: RuntimeProvisioningBackend,
+    ) {
         let init_content = "return 'init'\n";
+        let provisioning_backend_line = match provisioning_backend {
+            RuntimeProvisioningBackend::ConfigSlots => String::new(),
+            RuntimeProvisioningBackend::ModuleFiles => {
+                "provisioning_backend = \"module-files\"\n\n".to_string()
+            }
+        };
 
         fs::create_dir_all(runtime_root).unwrap();
         fs::write(runtime_root.join("lcd-init.lua"), init_content).unwrap();
@@ -1752,6 +2020,7 @@ mod tests {
             runtime_root.join("manifest.toml"),
             format!(
                 r#"
+{provisioning_backend_line}
 [[layers]]
 name = "persistent"
 priority = 0
@@ -1773,6 +2042,7 @@ event = 8
 asset = "lcd-draw.lua"
 install_order = 20
 "#,
+                provisioning_backend_line = provisioning_backend_line,
             ),
         )
         .unwrap();
@@ -1780,6 +2050,15 @@ install_order = 20
 
     fn write_runtime_fixture(root: &Path, name: &str, draw_content: &str) {
         write_runtime_bundle_dir(&root.join(name), draw_content);
+    }
+
+    fn write_runtime_fixture_with_backend(
+        root: &Path,
+        name: &str,
+        draw_content: &str,
+        provisioning_backend: RuntimeProvisioningBackend,
+    ) {
+        write_runtime_bundle_dir_with_backend(&root.join(name), draw_content, provisioning_backend);
     }
 
     #[test]
@@ -2148,6 +2427,132 @@ install_order = 10
         assert!(pre_install_runtime_dir_from_root(storage.path())
             .join("sentinel.txt")
             .exists());
+    }
+
+    #[test]
+    fn module_file_install_routes_backup_reads_and_writes_through_the_selected_backend() {
+        let fixture = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        write_runtime_fixture_with_backend(
+            fixture.path(),
+            "file-runtime",
+            "return 'draw via file manager'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        let bundle = RuntimeBundle::load_from_dir(fixture.path().join("file-runtime")).unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+        accessor.module_files.insert(
+            "lcd-init".to_string(),
+            RuntimeSlotRead {
+                source_target: GridTarget::new(0, 0),
+                content: "return 'pre-init file'\n".to_string(),
+            },
+        );
+
+        let report = install_runtime_bundle_with_storage(
+            &bundle,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+            storage.path(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            accessor.write_order(),
+            &["lcd-init".to_string(), "lcd-draw".to_string()]
+        );
+        assert!(accessor.stored_pages().is_empty());
+        assert!(report.verification_report().is_exact_match());
+        assert_eq!(
+            accessor.module_files["lcd-draw"].content,
+            bundle
+                .assets()
+                .iter()
+                .find(|asset| asset.slot.name == "lcd-draw")
+                .unwrap()
+                .normalized_content
+        );
+
+        let backup_bundle = read_backup_bundle(storage.path());
+        assert_eq!(
+            backup_bundle.manifest().provisioning_backend,
+            RuntimeProvisioningBackend::ModuleFiles
+        );
+        assert_eq!(
+            backup_bundle.assets()[0].normalized_content,
+            "return 'pre-init file'\n"
+        );
+        assert_eq!(backup_bundle.assets()[1].normalized_content, "");
+    }
+
+    #[test]
+    fn module_file_upgrade_skips_backup_refresh_and_page_store() {
+        let fixture = tempdir().unwrap();
+        let storage = tempdir().unwrap();
+        write_runtime_fixture_with_backend(
+            fixture.path(),
+            "current",
+            "return 'current draw'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        write_runtime_fixture_with_backend(
+            fixture.path(),
+            "older",
+            "return 'older draw'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+
+        let current_bundle = RuntimeBundle::load_from_dir(fixture.path().join("current")).unwrap();
+        let older_bundle = RuntimeBundle::load_from_dir(fixture.path().join("older")).unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        for asset in older_bundle.assets() {
+            accessor.module_files.insert(
+                asset.slot.name.clone(),
+                RuntimeSlotRead {
+                    source_target: GridTarget::new(0, 0),
+                    content: asset.normalized_content.clone(),
+                },
+            );
+        }
+
+        fs::create_dir_all(pre_install_runtime_dir_from_root(storage.path())).unwrap();
+        fs::write(
+            pre_install_runtime_dir_from_root(storage.path()).join("sentinel.txt"),
+            "keep",
+        )
+        .unwrap();
+
+        let report = install_runtime_bundle_with_storage(
+            &current_bundle,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+            storage.path(),
+            false,
+        )
+        .unwrap();
+
+        assert!(report.verification_report().is_exact_match());
+        assert!(accessor.stored_pages().is_empty());
+        assert!(pre_install_runtime_dir_from_root(storage.path())
+            .join("sentinel.txt")
+            .exists());
+        assert_eq!(
+            accessor.module_files["lcd-draw"].content,
+            current_bundle
+                .assets()
+                .iter()
+                .find(|asset| asset.slot.name == "lcd-draw")
+                .unwrap()
+                .normalized_content
+        );
     }
 
     #[test]

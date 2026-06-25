@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use crate::protocol::LuaValue;
-use crate::runtime::{Result, RuntimeError, RuntimeEvaluateReport, TransportRuntimeSlotReader};
+use crate::runtime::{
+    Result, RuntimeError, RuntimeEvaluateReport, RuntimeSlotRead, TransportRuntimeSlotReader,
+};
 use crate::runtime_bundle::OwnedRuntimeSlot;
 use crate::targeting::ResolvedTarget;
 use crate::transport::SerialTransport;
@@ -43,16 +45,27 @@ pub(crate) fn read_owned_slot_module_file<E>(
     evaluator: &mut E,
     target: ResolvedTarget,
     slot: &OwnedRuntimeSlot,
-) -> Result<Option<String>>
+) -> Result<Option<RuntimeSlotRead>>
 where
     E: ModuleFileEvaluator,
 {
     let path = derive_owned_slot_module_file_path(slot)?;
     let mut content = String::new();
     let mut offset = 0usize;
+    let mut source_target = None;
 
     loop {
         let report = evaluator.evaluate_lua(target, &build_read_chunk_lua(&path, offset))?;
+        match source_target {
+            Some(expected_target) if report.source_target != expected_target => {
+                return Err(RuntimeError::unexpected_response(format!(
+                    "module file {} responded from multiple module targets while it was being read back",
+                    path
+                )));
+            }
+            None => source_target = Some(report.source_target),
+            _ => {}
+        }
         let (exists, chunk) = decode_read_chunk_response(&path, &report.values)?;
 
         if !exists {
@@ -70,7 +83,11 @@ where
         content.push_str(&chunk);
 
         if chunk.len() < READ_CHUNK_SIZE {
-            return Ok(Some(content));
+            return Ok(Some(RuntimeSlotRead {
+                source_target: source_target
+                    .expect("module file read should observe a source target"),
+                content,
+            }));
         }
     }
 }
@@ -295,7 +312,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(content, Some(format!("{}tail", "a".repeat(50))));
+        let content = content.unwrap();
+        assert_eq!(content.content, format!("{}tail", "a".repeat(50)));
+        assert_eq!(content.source_target, GridTarget::new(0, 0));
         assert_eq!(evaluator.scripts.len(), 2);
         assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.lua\",\"r\")"));
         assert!(evaluator.scripts[0].contains("f:seek(\"set\",0)"));
