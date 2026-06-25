@@ -352,18 +352,18 @@ Use this as the execution order if implementation begins.
 
 ### Step 4: Integrate backend selection into runtime install/upgrade
 
-- [ ] Route runtime install writes through the selected backend.
-- [ ] Route pre-install backup capture through the selected backend.
-- [ ] Route runtime upgrade through the selected backend.
-- [ ] Add tests for file-backed install planning and backup capture.
+- [x] Route runtime install writes through the selected backend.
+- [x] Route pre-install backup capture through the selected backend.
+- [x] Route runtime upgrade through the selected backend.
+- [x] Add tests for file-backed install planning and backup capture.
 - [ ] Hardware gate: confirm `runtime install <file-backed-name>` works.
 
 ### Step 5: Integrate backend selection into verify/status/repair
 
-- [ ] Route runtime inspection through the selected backend.
-- [ ] Detect drift by file content mismatch on the module.
-- [ ] Route runtime repair through the selected backend.
-- [ ] Add tests for exact-match, drift, and missing-file cases.
+- [x] Route runtime inspection through the selected backend.
+- [x] Detect drift by file content mismatch on the module.
+- [x] Route runtime repair through the selected backend.
+- [x] Add tests for exact-match, drift, and missing-file cases.
 - [ ] Hardware gate: confirm drifted `/00/0d/08.lua` is detected and repaired.
 
 ### Step 6: Integrate backend selection into remove/uninstall

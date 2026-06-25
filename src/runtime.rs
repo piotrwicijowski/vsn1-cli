@@ -2556,6 +2556,160 @@ install_order = 10
     }
 
     #[test]
+    fn module_file_verify_reports_exact_match_when_all_owned_files_match() {
+        let fixture = tempdir().unwrap();
+        write_runtime_fixture_with_backend(
+            fixture.path(),
+            "runtime",
+            "return 'draw via file manager'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        let bundle = RuntimeBundle::load_from_dir(fixture.path().join("runtime")).unwrap();
+        let mut reader = StaticSlotReader::default();
+
+        for asset in bundle.assets() {
+            reader.insert(
+                &asset.slot,
+                GridTarget::new(0, 0),
+                asset.normalized_content.clone(),
+            );
+        }
+
+        let report = verify_runtime_with_bundle_dir(
+            fixture.path().join("runtime"),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut reader,
+        )
+        .unwrap();
+
+        assert!(report.is_exact_match());
+        assert_eq!(report.status_label(), "exact-match compatible");
+    }
+
+    #[test]
+    fn module_file_verify_fails_when_owned_file_content_drifted() {
+        let fixture = tempdir().unwrap();
+        write_runtime_fixture_with_backend(
+            fixture.path(),
+            "runtime",
+            "return 'draw via file manager'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        let bundle = RuntimeBundle::load_from_dir(fixture.path().join("runtime")).unwrap();
+        let mut reader = StaticSlotReader::default();
+
+        for asset in bundle.assets() {
+            let content = if asset.slot.name == "lcd-draw" {
+                "return 'drifted file content'\n".to_string()
+            } else {
+                asset.normalized_content.clone()
+            };
+
+            reader.insert(&asset.slot, GridTarget::new(0, 0), content);
+        }
+
+        let error = verify_runtime_with_bundle_dir(
+            fixture.path().join("runtime"),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut reader,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("lcd-draw at page=0 element=13 event=8 drifted"));
+    }
+
+    #[test]
+    fn module_file_inspect_marks_missing_owned_files() {
+        let fixture = tempdir().unwrap();
+        write_runtime_fixture_with_backend(
+            fixture.path(),
+            "runtime",
+            "return 'draw via file manager'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        let bundle = RuntimeBundle::load_from_dir(fixture.path().join("runtime")).unwrap();
+        let mut reader = StaticSlotReader::default();
+
+        let init_asset = bundle
+            .assets()
+            .iter()
+            .find(|asset| asset.slot.name == "lcd-init")
+            .unwrap();
+        reader.insert(
+            &init_asset.slot,
+            GridTarget::new(0, 0),
+            init_asset.normalized_content.clone(),
+        );
+
+        let report = inspect_runtime_with_bundle_dir(
+            fixture.path().join("runtime"),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut reader,
+        )
+        .unwrap();
+
+        assert!(!report.is_exact_match());
+        assert!(report
+            .slot_inspections()
+            .iter()
+            .any(|inspection| inspection.slot.name == "lcd-draw"
+                && matches!(inspection.status, RuntimeSlotStatus::Missing)));
+    }
+
+    #[test]
+    fn module_file_repair_reinstalls_current_bundle_when_owned_files_are_drifted_or_missing() {
+        let fixture = tempdir().unwrap();
+        write_runtime_bundle_dir_with_backend(
+            &installed_runtime_dir_from_root(fixture.path()),
+            "return 'installed draw'\n",
+            RuntimeProvisioningBackend::ModuleFiles,
+        );
+        let bundle =
+            RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(fixture.path())).unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        accessor.module_files.insert(
+            "lcd-init".to_string(),
+            RuntimeSlotRead {
+                source_target: GridTarget::new(0, 0),
+                content: "return 'drifted file init'\n".to_string(),
+            },
+        );
+
+        let report = repair_installed_runtime_with_storage(
+            fixture.path(),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            accessor.write_order(),
+            &bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(accessor.stored_pages().is_empty());
+        assert!(report.verification_report().is_exact_match());
+        assert_eq!(
+            accessor.module_files["lcd-draw"].content,
+            bundle
+                .assets()
+                .iter()
+                .find(|asset| asset.slot.name == "lcd-draw")
+                .unwrap()
+                .normalized_content
+        );
+    }
+
+    #[test]
     fn repair_reinstalls_current_bundle_when_owned_slots_are_drifted_or_missing() {
         let fixture = tempdir().unwrap();
         let bundle = RuntimeBundle::bundled().unwrap();
