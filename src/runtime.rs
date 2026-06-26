@@ -737,16 +737,8 @@ pub fn verify_runtime_with_bundle_dir<R>(
 where
     R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
-    let report = inspect_runtime_with_bundle_dir(bundle_dir, requested_target, reader)?;
-
-    if report.is_exact_match() {
-        Ok(report)
-    } else {
-        Err(RuntimeError::verification_failed(format!(
-            "runtime bundle is not an exact match: {}",
-            report.verification_failure_summary()
-        )))
-    }
+    let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
+    verify_runtime_bundle(&bundle, requested_target, reader, "runtime bundle")
 }
 
 pub fn verify_installed_runtime<R>(
@@ -787,25 +779,45 @@ fn verify_runtime_with_optional_bundle_dir<R>(
 where
     R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
-    let Some(report) =
-        inspect_runtime_with_optional_bundle_dir(bundle_dir, requested_target, reader)?
-    else {
+    let Some(bundle_dir) = bundle_dir.filter(|path| path.is_dir()) else {
         return Err(RuntimeError::verification_failed(
             "no frozen installed runtime was found under ~/.config/vsn1-cli/runtime",
         ));
     };
 
+    let bundle = RuntimeBundle::load_from_dir(bundle_dir)?;
+    verify_runtime_bundle(&bundle, requested_target, reader, "installed runtime")
+}
+
+fn verify_runtime_bundle<R>(
+    bundle: &RuntimeBundle,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+    subject: &'static str,
+) -> Result<RuntimeInspectionReport>
+where
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
+{
+    let mut progress = RuntimeProvisioningProgressBar::for_verification_bundle(bundle);
+    let report =
+        inspect_runtime_bundle_with_progress(bundle, requested_target, reader, progress.as_mut())?;
+
+    if let Some(progress) = progress.as_mut() {
+        progress.finish();
+    }
+
     if report.is_exact_match() {
         Ok(report)
     } else {
         Err(RuntimeError::verification_failed(format!(
-            "installed runtime is not an exact match: {}",
+            "{subject} is not an exact match: {}",
             report.verification_failure_summary()
         )))
     }
 }
 
 struct RuntimeProvisioningProgressBar {
+    label: &'static str,
     total_steps: usize,
     completed_steps: usize,
     phase: &'static str,
@@ -813,7 +825,7 @@ struct RuntimeProvisioningProgressBar {
 }
 
 impl RuntimeProvisioningProgressBar {
-    fn for_bundle(bundle: &RuntimeBundle, capture_pre_install: bool) -> Option<Self> {
+    fn for_install_bundle(bundle: &RuntimeBundle, capture_pre_install: bool) -> Option<Self> {
         if bundle.manifest().provisioning_backend != RuntimeProvisioningBackend::ModuleFiles
             || !io::stderr().is_terminal()
         {
@@ -821,28 +833,46 @@ impl RuntimeProvisioningProgressBar {
         }
 
         let asset_count = bundle.assets().len();
-        let backup_steps = if capture_pre_install {
-            bundle
-                .assets()
-                .iter()
-                .map(|asset| module_file_read_step_estimate(&asset.stored_content))
-                .sum()
-        } else {
-            0
-        };
+        let backup_steps = if capture_pre_install { asset_count } else { 0 };
         let upload_steps = bundle
             .assets()
             .iter()
             .map(|asset| module_file_write_step_count(&asset.stored_content))
             .sum::<usize>();
-        let total_steps = backup_steps + upload_steps + 1 + asset_count;
+        let verify_steps = bundle
+            .assets()
+            .iter()
+            .map(|asset| module_file_read_step_estimate(&asset.stored_content))
+            .sum::<usize>();
+        let total_steps = backup_steps + upload_steps + 1 + verify_steps;
 
-        Some(Self {
+        Some(Self::new("Runtime provisioning", total_steps))
+    }
+
+    fn for_verification_bundle(bundle: &RuntimeBundle) -> Option<Self> {
+        if bundle.manifest().provisioning_backend != RuntimeProvisioningBackend::ModuleFiles
+            || !io::stderr().is_terminal()
+        {
+            return None;
+        }
+
+        let total_steps = bundle
+            .assets()
+            .iter()
+            .map(|asset| module_file_read_step_estimate(&asset.stored_content))
+            .sum::<usize>();
+
+        Some(Self::new("Runtime verification", total_steps))
+    }
+
+    fn new(label: &'static str, total_steps: usize) -> Self {
+        Self {
+            label,
             total_steps: total_steps.max(1),
             completed_steps: 0,
             phase: "starting",
             needs_newline: false,
-        })
+        }
     }
 
     fn set_phase(&mut self, phase: &'static str) {
@@ -854,6 +884,10 @@ impl RuntimeProvisioningProgressBar {
         self.phase = phase;
         self.completed_steps = self.completed_steps.saturating_add(1).min(self.total_steps);
         self.render();
+    }
+
+    fn add_total_steps(&mut self, additional_steps: usize) {
+        self.total_steps = self.total_steps.saturating_add(additional_steps);
     }
 
     fn finish(&mut self) {
@@ -875,8 +909,8 @@ impl RuntimeProvisioningProgressBar {
         let percent = (self.completed_steps * 100) / self.total_steps;
 
         eprint!(
-            "\r\x1b[2KRuntime provisioning [{bar}] {percent:>3}% ({}/{}) {}",
-            self.completed_steps, self.total_steps, self.phase
+            "\r\x1b[2K{} [{bar}] {percent:>3}% ({}/{}) {}",
+            self.label, self.completed_steps, self.total_steps, self.phase
         );
         let _ = io::stderr().flush();
         self.needs_newline = true;
@@ -908,8 +942,10 @@ fn set_runtime_provisioning_phase(
 fn advance_runtime_provisioning_progress(
     progress: Option<&mut RuntimeProvisioningProgressBar>,
     phase: &'static str,
+    additional_total_steps: usize,
 ) {
     if let Some(progress) = progress {
+        progress.add_total_steps(additional_total_steps);
         progress.advance(phase);
     }
 }
@@ -924,7 +960,8 @@ fn install_runtime_bundle_with_storage<R>(
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
-    let mut progress = RuntimeProvisioningProgressBar::for_bundle(bundle, capture_pre_install);
+    let mut progress =
+        RuntimeProvisioningProgressBar::for_install_bundle(bundle, capture_pre_install);
 
     if capture_pre_install {
         set_runtime_provisioning_phase(progress.as_mut(), "backing up existing runtime");
@@ -1116,6 +1153,7 @@ where
                     advance_runtime_provisioning_progress(
                         progress.as_deref_mut(),
                         "uploading runtime module files",
+                        0,
                     );
                 };
                 reader.write_owned_module_file_with_progress(
@@ -1134,7 +1172,7 @@ where
         &stored_pages,
         reader,
     )?;
-    advance_runtime_provisioning_progress(progress.as_deref_mut(), "activating runtime");
+    advance_runtime_provisioning_progress(progress.as_deref_mut(), "activating runtime", 0);
 
     let verification_report =
         inspect_runtime_bundle_with_progress(bundle, requested_target, reader, progress)?;
@@ -1246,11 +1284,14 @@ where
     })?;
 
     for asset in bundle.assets() {
+        let mut read_steps = 0usize;
         let mut on_step = || {
             advance_runtime_provisioning_progress(
                 progress.as_deref_mut(),
                 "backing up existing runtime",
+                usize::from(read_steps > 0),
             );
+            read_steps += 1;
         };
         let content = read_slot_content_for_backup(
             bundle.manifest().provisioning_backend,
@@ -1507,11 +1548,39 @@ where
     set_runtime_provisioning_phase(progress.as_deref_mut(), "verifying installed runtime");
 
     for asset in bundle.assets() {
-        let read = read_runtime_asset(provisioning_backend, requested_target, &asset.slot, reader)?;
-        advance_runtime_provisioning_progress(
-            progress.as_deref_mut(),
-            "verifying installed runtime",
-        );
+        let read = match provisioning_backend {
+            RuntimeProvisioningBackend::ConfigSlots => {
+                let read = read_runtime_asset(
+                    provisioning_backend,
+                    requested_target,
+                    &asset.slot,
+                    reader,
+                )?;
+                advance_runtime_provisioning_progress(
+                    progress.as_deref_mut(),
+                    "verifying installed runtime",
+                    0,
+                );
+                read
+            }
+            RuntimeProvisioningBackend::ModuleFiles => {
+                let estimated_steps = module_file_read_step_estimate(&asset.stored_content);
+                let mut observed_steps = 0usize;
+                let mut on_step = || {
+                    advance_runtime_provisioning_progress(
+                        progress.as_deref_mut(),
+                        "verifying installed runtime",
+                        usize::from(observed_steps >= estimated_steps),
+                    );
+                    observed_steps += 1;
+                };
+                reader.read_owned_module_file_with_progress(
+                    requested_target,
+                    &asset.slot,
+                    &mut on_step,
+                )?
+            }
+        };
 
         let status = match read {
             None => RuntimeSlotStatus::Missing,
