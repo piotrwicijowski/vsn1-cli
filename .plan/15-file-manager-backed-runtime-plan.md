@@ -412,11 +412,18 @@ This should be decided by hardware behavior, not guesswork.
 
 The old slot-backed path explicitly sends `PAGEACTIVE` plus `PAGESTORE`.
 
-Unknowns to validate:
+Validated findings:
 
 1. whether direct file writes become active immediately
 2. whether they require an equivalent persistence or page reload action
 3. whether `runtime install` should still send page-store commands after file-backed writes for consistency
+
+Current answer after hardware validation:
+
+1. direct file writes do not become active immediately; a module restart still makes the new runtime live
+2. sending `PAGESTORE` after file-backed install is not a safe reload path; on hardware it overwrote the freshly written `.cfg` files with the currently active in-memory page state
+3. do not add automatic `PAGESTORE` to the module-files backend unless a future firmware behavior change proves it safe
+4. `PAGEDISCARD` is the first validated safe reload path; on hardware it refreshed the active page from the newly written file-backed cfg state without breaking exact-match verification
 
 ### 4. Should verification compare normalized Lua text or exact file bytes?
 

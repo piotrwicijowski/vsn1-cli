@@ -48,6 +48,10 @@ pub use error::{Error, Result};
 const TOP_LEVEL_LONG_ABOUT: &str = "Standalone CLI for controlling the VSN1 display over USB.\n\nUse `runtime install <name>` to provision a discovered runtime that the curated runtime-defined layered `screen` helpers expect.";
 const DEVICE_INFO_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli device info\n  vsn1-cli device info --device /dev/cu.usbmodem101\n  vsn1-cli device info --dx 0 --dy 0";
+const DEVICE_PAGE_STORE_AFTER_HELP: &str =
+    "Examples:\n  vsn1-cli device page-store\n  vsn1-cli device page-store --dx 0 --dy 0\n\nThis sends a raw PAGESTORE command over the config path to validate module behavior after file-backed runtime writes.";
+const DEVICE_PAGE_DISCARD_AFTER_HELP: &str =
+    "Examples:\n  vsn1-cli device page-discard\n  vsn1-cli device page-discard --dx 0 --dy 0\n\nThis sends a raw PAGEDISCARD command over the config path to validate whether the firmware can reload stored page configuration without a power cycle.";
 const RUNTIME_LIST_AFTER_HELP: &str = "Lists discovered runtime names and the source copy that won resolution. Discovery precedence is dev > user > system on directory-name collisions.";
 const RUNTIME_INSTALL_AFTER_HELP: &str = "Installs the selected discovered runtime into the manifest-owned slots, captures a pre-install backup under ~/.config/vsn1-cli/pre-install, freezes the runtime under ~/.config/vsn1-cli/runtime, and verifies an exact installed-runtime match.";
 const RUNTIME_VERIFY_AFTER_HELP: &str = "Fails unless every owned runtime slot matches the frozen installed runtime copy under ~/.config/vsn1-cli/runtime exactly.";
@@ -117,6 +121,22 @@ pub enum DeviceCommand {
         after_help = DEVICE_INFO_AFTER_HELP
     )]
     Info {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    #[command(
+        about = "Send a raw PAGESTORE command to the resolved module target",
+        after_help = DEVICE_PAGE_STORE_AFTER_HELP
+    )]
+    PageStore {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    #[command(
+        about = "Send a raw PAGEDISCARD command to the resolved module target",
+        after_help = DEVICE_PAGE_DISCARD_AFTER_HELP
+    )]
+    PageDiscard {
         #[command(flatten)]
         target: TargetArgs,
     },
@@ -290,6 +310,11 @@ pub enum CommandSuccess {
     DeviceInfo {
         device: String,
         target: ResolvedTarget,
+    },
+    DeviceAction {
+        device: String,
+        target: ResolvedTarget,
+        action: &'static str,
     },
     RuntimeList {
         runtimes: Vec<DiscoveredRuntime>,
@@ -526,6 +551,11 @@ pub fn render_command_success(success: &CommandSuccess) -> String {
         CommandSuccess::DeviceInfo { device, target } => {
             render_transport_open_output(device, *target, None)
         }
+        CommandSuccess::DeviceAction {
+            device,
+            target,
+            action,
+        } => render_transport_open_output(device, *target, Some(format!("Sent {action}.\n"))),
         CommandSuccess::RuntimeList { runtimes } => render_runtime_list(runtimes),
         CommandSuccess::ScreenAction {
             device,
@@ -598,6 +628,12 @@ where
             DeviceRequest::List => execute_device_list(discovery),
             DeviceRequest::Info { target } => {
                 execute_device_info(discovery, transport_factory, &target)
+            }
+            DeviceRequest::PageStore { target } => {
+                execute_device_page_store(discovery, transport_factory, &target)
+            }
+            DeviceRequest::PageDiscard { target } => {
+                execute_device_page_discard(discovery, transport_factory, &target)
             }
         },
         CommandRequest::Runtime(command) => match command {
@@ -709,6 +745,50 @@ where
     Ok(CommandSuccess::DeviceInfo {
         device: device.to_string(),
         target,
+    })
+}
+
+fn execute_device_page_store<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<CommandSuccess>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let device = resolve_usb_device(discovery, target_args)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    reader.send_page_store(target)?;
+
+    Ok(CommandSuccess::DeviceAction {
+        device: device.to_string(),
+        target,
+        action: "PAGESTORE command over the config path",
+    })
+}
+
+fn execute_device_page_discard<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<CommandSuccess>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let device = resolve_usb_device(discovery, target_args)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    reader.send_page_discard(target)?;
+
+    Ok(CommandSuccess::DeviceAction {
+        device: device.to_string(),
+        target,
+        action: "PAGEDISCARD command over the config path",
     })
 }
 
@@ -1601,6 +1681,58 @@ mod tests {
                             device: Some("/dev/cu.usbmodem101".to_string()),
                             dx: None,
                             dy: None,
+                        },
+                    },
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_device_page_store_with_explicit_target() {
+        let cli =
+            try_parse_from(["vsn1-cli", "device", "page-store", "--dx", "0", "--dy", "0"]).unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                debug: false,
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::PageStore {
+                        target: TargetArgs {
+                            device: None,
+                            dx: Some(0),
+                            dy: Some(0),
+                        },
+                    },
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_device_page_discard_with_explicit_target() {
+        let cli = try_parse_from([
+            "vsn1-cli",
+            "device",
+            "page-discard",
+            "--dx",
+            "0",
+            "--dy",
+            "0",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                debug: false,
+                command: TopLevelCommand::Device(DeviceArgs {
+                    command: DeviceCommand::PageDiscard {
+                        target: TargetArgs {
+                            device: None,
+                            dx: Some(0),
+                            dy: Some(0),
                         },
                     },
                 }),

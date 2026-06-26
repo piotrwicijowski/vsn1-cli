@@ -12,7 +12,7 @@ use crate::module_files::{
 };
 use crate::protocol::{
     self, ConfigFetch, ConfigLocation, ConfigWrite, EvaluateWrite, GridTarget, Heartbeat, LuaValue,
-    PacketIdentity, PageActive, PageStore, ProtocolError,
+    PacketIdentity, PageActive, PageDiscard, PageStore, ProtocolError,
 };
 use crate::runtime_bundle::{
     normalize_text_content, normalized_sha256, OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle,
@@ -36,6 +36,7 @@ const GRID_CONST_EOT: u8 = 0x04;
 const GRID_CONST_LF: u8 = 0x0a;
 const GRID_CLASS_CONFIG: usize = 0x060;
 const GRID_CLASS_PAGESTORE: usize = 0x061;
+const GRID_CLASS_PAGEDISCARD: usize = 0x063;
 const GRID_INSTR_ACKNOWLEDGE: usize = 0x0a;
 const GRID_INSTR_NACKNOWLEDGE: usize = 0x0b;
 const GRID_INSTR_REPORT: usize = 0x0d;
@@ -72,6 +73,8 @@ pub trait RuntimeSlotWriter {
 
 pub trait RuntimePageStorer {
     fn store_page(&mut self, target: ResolvedTarget, page: u8) -> Result<()>;
+
+    fn discard_page(&mut self, target: ResolvedTarget) -> Result<()>;
 }
 
 pub trait RuntimeSlotClearer {
@@ -398,6 +401,42 @@ where
         self.transport
     }
 
+    pub fn send_page_store(&mut self, target: ResolvedTarget) -> Result<()> {
+        self.transport.clear_input()?;
+
+        let page_store_packet = protocol::encode_page_store_packet(&PageStore {
+            target: target.grid_target(),
+            identity: self.next_identity(),
+        })?;
+        self.transport.write_config(&page_store_packet)?;
+
+        let inbound = read_transport_until_idle(
+            &mut self.transport,
+            PAGE_STORE_TOTAL_WINDOW,
+            PAGE_STORE_IDLE_WINDOW,
+        )?;
+
+        extract_page_store_ack(&inbound, target)
+    }
+
+    pub fn send_page_discard(&mut self, target: ResolvedTarget) -> Result<()> {
+        self.transport.clear_input()?;
+
+        let page_discard_packet = protocol::encode_page_discard_packet(&PageDiscard {
+            target: target.grid_target(),
+            identity: self.next_identity(),
+        })?;
+        self.transport.write_config(&page_discard_packet)?;
+
+        let inbound = read_transport_until_idle(
+            &mut self.transport,
+            PAGE_STORE_TOTAL_WINDOW,
+            PAGE_STORE_IDLE_WINDOW,
+        )?;
+
+        extract_page_discard_ack(&inbound, target)
+    }
+
     pub fn evaluate_lua(
         &mut self,
         target: ResolvedTarget,
@@ -509,6 +548,10 @@ where
         )?;
 
         extract_page_store_ack(&inbound, target)
+    }
+
+    fn discard_page(&mut self, target: ResolvedTarget) -> Result<()> {
+        self.send_page_discard(target)
     }
 }
 
@@ -869,7 +912,7 @@ where
         write_runtime_asset(provisioning_backend, requested_target, asset, reader)?;
     }
 
-    store_runtime_pages(
+    finalize_runtime_write_activation(
         provisioning_backend,
         requested_target,
         &stored_pages,
@@ -1327,6 +1370,23 @@ where
     Ok(())
 }
 
+fn finalize_runtime_write_activation<R>(
+    provisioning_backend: RuntimeProvisioningBackend,
+    requested_target: ResolvedTarget,
+    pages: &[u8],
+    reader: &mut R,
+) -> Result<()>
+where
+    R: RuntimePageStorer,
+{
+    match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => {
+            store_runtime_pages(provisioning_backend, requested_target, pages, reader)
+        }
+        RuntimeProvisioningBackend::ModuleFiles => reader.discard_page(requested_target),
+    }
+}
+
 fn read_transport_until_idle(
     transport: &mut impl SerialTransport,
     total_window: Duration,
@@ -1494,6 +1554,63 @@ fn extract_page_store_ack(inbound: &[u8], requested_target: ResolvedTarget) -> R
         },
         targets => Err(RuntimeError::unexpected_response(format!(
             "multiple PAGESTORE acknowledgements were returned ({})",
+            format_targets(targets)
+        ))),
+    }
+}
+
+fn extract_page_discard_ack(inbound: &[u8], requested_target: ResolvedTarget) -> Result<()> {
+    let mut acknowledgements = Vec::new();
+    let mut rejections = Vec::new();
+
+    for frame in split_complete_frames(inbound) {
+        if !verify_grid_frame_checksum(frame) {
+            continue;
+        }
+
+        let Some(source_x) = parse_grid_coordinate_range(frame, 10) else {
+            continue;
+        };
+        let Some(source_y) = parse_grid_coordinate_range(frame, 12) else {
+            continue;
+        };
+        let source_target = GridTarget::new(source_x, source_y);
+
+        for block in split_class_blocks(frame) {
+            if parse_ascii_hex_range(block, 1, 3) != Some(GRID_CLASS_PAGEDISCARD) {
+                continue;
+            }
+
+            match parse_ascii_hex_range(block, 4, 1) {
+                Some(GRID_INSTR_ACKNOWLEDGE) => acknowledgements.push(source_target),
+                Some(GRID_INSTR_NACKNOWLEDGE) => rejections.push(source_target),
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(actual_target) = rejections.into_iter().next() {
+        return Err(RuntimeError::verification_failed(format!(
+            "page discard was rejected by dx={} dy={}",
+            actual_target.dx, actual_target.dy
+        )));
+    }
+
+    match acknowledgements.as_slice() {
+        [] => Err(RuntimeError::unexpected_response(
+            "no PAGEDISCARD acknowledge was observed in read-back",
+        )),
+        [actual_target] => match requested_target {
+            ResolvedTarget::Explicit(expected) if *actual_target != expected => {
+                Err(RuntimeError::verification_failed(format!(
+                    "page discard acknowledged from dx={} dy={} instead of the requested target",
+                    actual_target.dx, actual_target.dy
+                )))
+            }
+            _ => Ok(()),
+        },
+        targets => Err(RuntimeError::unexpected_response(format!(
+            "multiple PAGEDISCARD acknowledgements were returned ({})",
             format_targets(targets)
         ))),
     }
@@ -1778,12 +1895,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transport_runtime_slot_reader_sends_page_store_and_accepts_ack() {
+        let mut transport = FakeTransport::default();
+        transport.queue_read_data(grid_frame(GridTarget::new(0, 0), b"\x02061a\x03\x04"));
+
+        let mut reader = TransportRuntimeSlotReader::new(transport).unwrap();
+        reader
+            .send_page_store(ResolvedTarget::Explicit(GridTarget::new(0, 0)))
+            .unwrap();
+
+        let transport = reader.into_inner();
+        assert_eq!(transport.config_writes().len(), 1);
+        assert_eq!(&transport.config_writes()[0][24..28], b"061e");
+    }
+
+    #[test]
+    fn transport_runtime_slot_reader_sends_page_discard_and_accepts_ack() {
+        let mut transport = FakeTransport::default();
+        transport.queue_read_data(grid_frame(GridTarget::new(0, 0), b"\x02063a\x03\x04"));
+
+        let mut reader = TransportRuntimeSlotReader::new(transport).unwrap();
+        reader
+            .send_page_discard(ResolvedTarget::Explicit(GridTarget::new(0, 0)))
+            .unwrap();
+
+        let transport = reader.into_inner();
+        assert_eq!(transport.config_writes().len(), 1);
+        assert_eq!(&transport.config_writes()[0][24..28], b"063e");
+    }
+
     #[derive(Default)]
     struct StaticSlotReader {
         slots: BTreeMap<String, RuntimeSlotRead>,
     }
 
-    fn evaluate_response_frame(source_target: GridTarget, class_block: &[u8]) -> Vec<u8> {
+    fn grid_frame(source_target: GridTarget, class_block: &[u8]) -> Vec<u8> {
         let mut packet = vec![0x01, 0x0f];
         push_ascii_hex(&mut packet, 4, 0);
         push_ascii_hex(&mut packet, 2, 1);
@@ -1805,6 +1952,10 @@ mod tests {
         push_ascii_hex(&mut packet, 2, checksum as usize);
         packet.push(0x0a);
         packet
+    }
+
+    fn evaluate_response_frame(source_target: GridTarget, class_block: &[u8]) -> Vec<u8> {
+        grid_frame(source_target, class_block)
     }
 
     fn push_ascii_hex(buffer: &mut Vec<u8>, width: usize, value: usize) {
@@ -1873,6 +2024,7 @@ mod tests {
         writes: Vec<String>,
         clears: Vec<String>,
         stored_pages: Vec<u8>,
+        discarded_pages: usize,
         slots: BTreeMap<String, RuntimeSlotRead>,
         module_files: BTreeMap<String, RuntimeSlotRead>,
         persist_writes: bool,
@@ -1891,6 +2043,10 @@ mod tests {
 
         fn clear_order(&self) -> &[String] {
             &self.clears
+        }
+
+        fn discarded_pages(&self) -> usize {
+            self.discarded_pages
         }
     }
 
@@ -1946,6 +2102,11 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+
+        fn discard_page(&mut self, _target: ResolvedTarget) -> Result<()> {
+            self.discarded_pages += 1;
+            Ok(())
         }
     }
 
@@ -2441,6 +2602,7 @@ install_order = 10
                 .collect::<Vec<_>>()
         );
         assert_eq!(accessor.stored_pages(), &[0]);
+        assert_eq!(accessor.discarded_pages(), 0);
         assert!(report.verification_report().is_exact_match());
         let installed_bundle =
             RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(storage.path())).unwrap();
@@ -2498,6 +2660,7 @@ install_order = 10
             &["lcd-init".to_string(), "lcd-draw".to_string()]
         );
         assert!(accessor.stored_pages().is_empty());
+        assert_eq!(accessor.discarded_pages(), 1);
         assert!(report.verification_report().is_exact_match());
         assert_eq!(
             accessor.module_files["lcd-draw"].content,
@@ -2573,6 +2736,7 @@ install_order = 10
 
         assert!(report.verification_report().is_exact_match());
         assert!(accessor.stored_pages().is_empty());
+        assert_eq!(accessor.discarded_pages(), 1);
         assert!(pre_install_runtime_dir_from_root(storage.path())
             .join("sentinel.txt")
             .exists());
@@ -2729,6 +2893,7 @@ install_order = 10
                 .collect::<Vec<_>>()
         );
         assert!(accessor.stored_pages().is_empty());
+        assert_eq!(accessor.discarded_pages(), 1);
         assert!(report.verification_report().is_exact_match());
         assert_eq!(
             accessor.module_files["lcd-draw"].content,
@@ -2999,6 +3164,7 @@ install_order = 10
         );
         assert!(accessor.clear_order().is_empty());
         assert!(accessor.stored_pages().is_empty());
+        assert_eq!(accessor.discarded_pages(), 1);
         assert_eq!(report.removed_slots().len(), bundle.assets().len());
         assert!(report.restored_from_backup());
         assert_eq!(report.warning(), None);

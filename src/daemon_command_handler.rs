@@ -108,6 +108,58 @@ where
                     target: resolved_target,
                 }))
             }
+            DeviceRequest::PageStore { target } => {
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            reader.send_page_store(resolved_target)?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::DeviceAction {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    action: "PAGESTORE command over the config path",
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
+            DeviceRequest::PageDiscard { target } => {
+                let resolved_target = resolve_target(&target)?;
+                let device = resolve_usb_device(&self.discovery, &target)?;
+                let device_display = device.to_string();
+                let port_name = device.port_name.clone();
+                self.sessions
+                    .with_transport::<String, crate::Error, _>(
+                        &port_name,
+                        protocol::GRID_BAUD_RATE,
+                        move |transport| {
+                            let mut reader = TransportRuntimeSlotReader::new(
+                                BorrowedSerialTransport(transport),
+                            )?;
+                            reader.send_page_discard(resolved_target)?;
+
+                            Ok(crate::render_command_success(
+                                &CommandSuccess::DeviceAction {
+                                    device: device_display.clone(),
+                                    target: resolved_target,
+                                    action: "PAGEDISCARD command over the config path",
+                                },
+                            ))
+                        },
+                    )
+                    .map_err(crate::Error::from)
+            }
         }
     }
 

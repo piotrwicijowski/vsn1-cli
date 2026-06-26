@@ -22,6 +22,8 @@ pub enum CommandRequest {
 pub enum DeviceRequest {
     List,
     Info { target: TargetArgs },
+    PageStore { target: TargetArgs },
+    PageDiscard { target: TargetArgs },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +63,8 @@ impl CommandRequest {
         match self {
             Self::Device(DeviceRequest::List) => "device list",
             Self::Device(DeviceRequest::Info { .. }) => "device info",
+            Self::Device(DeviceRequest::PageStore { .. }) => "device page-store",
+            Self::Device(DeviceRequest::PageDiscard { .. }) => "device page-discard",
             Self::Runtime(RuntimeRequest::List) => "runtime list",
             Self::Runtime(RuntimeRequest::Install { .. }) => "runtime install",
             Self::Runtime(RuntimeRequest::Verify { .. }) => "runtime verify",
@@ -81,6 +85,8 @@ impl CommandRequest {
                 CommandRouting::LocalOnly
             }
             Self::Device(DeviceRequest::Info { .. })
+            | Self::Device(DeviceRequest::PageStore { .. })
+            | Self::Device(DeviceRequest::PageDiscard { .. })
             | Self::Runtime(RuntimeRequest::Install { .. })
             | Self::Runtime(RuntimeRequest::Verify { .. })
             | Self::Runtime(RuntimeRequest::Upgrade { .. })
@@ -124,6 +130,8 @@ impl From<DeviceArgs> for DeviceRequest {
         match value.command {
             DeviceCommand::List => Self::List,
             DeviceCommand::Info { target } => Self::Info { target },
+            DeviceCommand::PageStore { target } => Self::PageStore { target },
+            DeviceCommand::PageDiscard { target } => Self::PageDiscard { target },
         }
     }
 }
@@ -174,6 +182,14 @@ mod tests {
     #[test]
     fn classifies_serial_commands_as_daemon_eligible() {
         assert!(CommandRequest::Device(DeviceRequest::Info {
+            target: TargetArgs::default(),
+        })
+        .is_daemon_eligible());
+        assert!(CommandRequest::Device(DeviceRequest::PageStore {
+            target: TargetArgs::default(),
+        })
+        .is_daemon_eligible());
+        assert!(CommandRequest::Device(DeviceRequest::PageDiscard {
             target: TargetArgs::default(),
         })
         .is_daemon_eligible());

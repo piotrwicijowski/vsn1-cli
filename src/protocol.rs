@@ -18,6 +18,7 @@ const GRID_CONST_EOB: u8 = 0x17;
 
 const GRID_CLASS_CONFIG: u16 = 0x060;
 const GRID_CLASS_PAGESTORE: u16 = 0x061;
+const GRID_CLASS_PAGEDISCARD: u16 = 0x063;
 const GRID_CLASS_EVALUATE: u16 = 0x086;
 const GRID_CLASS_IMMEDIATE: u16 = 0x085;
 const GRID_CLASS_HEARTBEAT: u16 = 0x010;
@@ -105,6 +106,12 @@ pub struct Heartbeat {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PageStore {
+    pub target: GridTarget,
+    pub identity: PacketIdentity,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PageDiscard {
     pub target: GridTarget,
     pub identity: PacketIdentity,
 }
@@ -333,6 +340,16 @@ pub fn encode_page_store_packet(store: &PageStore) -> Result<Vec<u8>> {
     class.push(GRID_CONST_EOT);
 
     encode_packet(store.target, store.identity, &class)
+}
+
+pub fn encode_page_discard_packet(discard: &PageDiscard) -> Result<Vec<u8>> {
+    let mut class = vec![GRID_CONST_STX];
+    write_ascii_hex(&mut class, 3, GRID_CLASS_PAGEDISCARD as usize);
+    write_ascii_hex(&mut class, 1, GRID_INSTR_EXECUTE as usize);
+    class.push(GRID_CONST_ETX);
+    class.push(GRID_CONST_EOT);
+
+    encode_packet(discard.target, discard.identity, &class)
 }
 
 pub fn encode_page_active_packet(change: &PageActive) -> Result<Vec<u8>> {
@@ -847,6 +864,19 @@ mod tests {
 
         assert_eq!(&packet[14..18], b"7f80");
         assert_eq!(&packet[23..28], b"\x02061e");
+        assert!(packet_has_valid_checksum(&packet));
+    }
+
+    #[test]
+    fn encodes_page_discard_packet() {
+        let packet = encode_page_discard_packet(&PageDiscard {
+            target: GridTarget::new(0, 1),
+            identity: PacketIdentity::new(0x55, 0x02),
+        })
+        .unwrap();
+
+        assert_eq!(&packet[14..18], b"7f80");
+        assert_eq!(&packet[23..28], b"\x02063e");
         assert!(packet_has_valid_checksum(&packet));
     }
 
