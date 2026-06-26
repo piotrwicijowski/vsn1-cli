@@ -8,7 +8,7 @@ The immediate goal is intentionally narrow:
 
 1. keep the public CLI porcelain unchanged
 2. use file-manager access only behind the existing `runtime` commands
-3. focus only on the two runtime-owned event files at `/00/0d/00.lua` and `/00/0d/08.lua`
+3. focus only on the two runtime-owned event files at `/00/0d/00.cfg` and `/00/0d/08.cfg`
 4. prove that the same runtime assets currently installed as `page=0 element=13 event=0` and `page=0 element=13 event=8` can be installed, verified, and removed through the file-manager path instead
 
 This is a runtime lifecycle follow-up, not a general filesystem product feature.
@@ -18,7 +18,7 @@ This is a runtime lifecycle follow-up, not a general filesystem product feature.
 ### In scope
 
 1. internal host support for raw `EVALUATE` requests and Lua-value response decoding
-2. an internal runtime provisioning backend that reads and writes `/00/0d/00.lua` and `/00/0d/08.lua`
+2. an internal runtime provisioning backend that reads and writes `/00/0d/00.cfg` and `/00/0d/08.cfg`
 3. runtime install, upgrade, verify, repair, status, and remove/uninstall behavior for that backend
 4. pre-install backup and frozen-runtime persistence for that backend
 5. hardware validation that the screen behaves the same after file-backed install as after the old slot-backed install
@@ -108,8 +108,8 @@ Instead, derive the target file path from the existing slot location:
 
 Examples for the current runtime-owned slots:
 
-1. `page=0 element=13 event=0` -> `/00/0d/00.lua`
-2. `page=0 element=13 event=8` -> `/00/0d/08.lua`
+1. `page=0 element=13 event=0` -> `/00/0d/00.cfg`
+2. `page=0 element=13 event=8` -> `/00/0d/08.cfg`
 
 Why this is the right first step:
 
@@ -204,7 +204,7 @@ Teach `vsn1-cli` how to send module-targeted `EVALUATE` requests and decode the 
 
 ### Goal
 
-Implement the smallest internal file API needed to manage `/00/0d/00.lua` and `/00/0d/08.lua`.
+Implement the smallest internal file API needed to manage `/00/0d/00.cfg` and `/00/0d/08.cfg`.
 
 ### Work
 
@@ -219,7 +219,7 @@ Implement the smallest internal file API needed to manage `/00/0d/00.lua` and `/
 
 1. unit tests for slot-location to device-file path mapping
 2. unit tests for chunking and Lua escaping helpers
-3. hardware validation that `lcd-init.lua` and `lcd-draw.lua` can be uploaded to `/00/0d/00.lua` and `/00/0d/08.lua`
+3. hardware validation that `lcd-init.lua` and `lcd-draw.lua` can be uploaded to `/00/0d/00.cfg` and `/00/0d/08.cfg`
 
 ### Exit criteria
 
@@ -322,7 +322,7 @@ Prove that the file-backed runtime behaves the same on hardware as the current s
 
 1. the device visibly behaves the same after file-backed install as after legacy slot-backed install
 2. the runtime helper contract used by `screen` commands still works unchanged
-3. a deliberate edit to `/00/0d/08.lua` is detected by `runtime verify`
+3. a deliberate edit to `/00/0d/08.cfg` is detected by `runtime verify`
 
 ## Recommended Step-By-Step Checklist
 
@@ -333,7 +333,7 @@ Use this as the execution order if implementation begins.
 - [x] Encode targeted raw `EVALUATE` packets in `protocol.rs`.
 - [x] Add Lua-value response decoding for nil/bool/number/string/table.
 - [x] Add tests for packet encoding and response parsing.
-- [ ] Hardware gate: confirm `return 1` evaluates successfully on a real device.
+- [x] Hardware gate: confirm `return 1` evaluates successfully on a real device.
 
 ### Step 2: Add an internal module-files helper
 
@@ -341,7 +341,7 @@ Use this as the execution order if implementation begins.
 - [x] Implement chunked temp-file write plus rename.
 - [x] Implement fixed-path clear/delete semantics for runtime-owned files.
 - [x] Add tests for path derivation and chunking helpers.
-- [ ] Hardware gate: confirm read/write of `/00/0d/00.lua` and `/00/0d/08.lua`.
+- [x] Hardware gate: confirm read/write of `/00/0d/00.cfg` and `/00/0d/08.cfg`.
 
 ### Step 3: Extend runtime manifests with backend selection
 
@@ -356,7 +356,7 @@ Use this as the execution order if implementation begins.
 - [x] Route pre-install backup capture through the selected backend.
 - [x] Route runtime upgrade through the selected backend.
 - [x] Add tests for file-backed install planning and backup capture.
-- [ ] Hardware gate: confirm `runtime install <file-backed-name>` works.
+- [x] Hardware gate: confirm `runtime install <file-backed-name>` works.
 
 ### Step 5: Integrate backend selection into verify/status/repair
 
@@ -364,7 +364,7 @@ Use this as the execution order if implementation begins.
 - [x] Detect drift by file content mismatch on the module.
 - [x] Route runtime repair through the selected backend.
 - [x] Add tests for exact-match, drift, and missing-file cases.
-- [ ] Hardware gate: confirm drifted `/00/0d/08.lua` is detected and repaired.
+- [ ] Hardware gate: confirm drifted `/00/0d/08.cfg` is detected and repaired.
 
 ### Step 6: Integrate backend selection into remove/uninstall
 
@@ -386,7 +386,7 @@ Use this as the execution order if implementation begins.
 2. Keep ownership and curated field metadata manifest-driven.
 3. Keep runtime lifecycle semantics the same from the user's point of view.
 4. Keep the old slot-backed runtime path available until hardware validation proves the file-backed path is equally reliable.
-5. Keep the file-backed proof narrowly scoped to `/00/0d/00.lua` and `/00/0d/08.lua` before broadening.
+5. Keep the file-backed proof narrowly scoped to `/00/0d/00.cfg` and `/00/0d/08.cfg` before broadening.
 
 ## Open Questions And Uncertainties
 
@@ -403,7 +403,7 @@ Recommendation:
 
 Open choice:
 
-1. delete `/00/0d/00.lua` and `/00/0d/08.lua`
+1. delete `/00/0d/00.cfg` and `/00/0d/08.cfg`
 2. overwrite them with empty files
 
 This should be decided by hardware behavior, not guesswork.
@@ -433,13 +433,13 @@ The current plan assumes the event file path is:
 /{page:02x}/{element:02x}/{event:02x}.lua
 ```
 
-That matches the requested `/00/0d/00.lua` and `/00/0d/08.lua` target paths, but this should still be confirmed on hardware before the rule is generalized beyond this POC.
+That now matches the confirmed `/00/0d/00.cfg` and `/00/0d/08.cfg` target paths, but this should still be confirmed on hardware before the rule is generalized beyond this POC.
 
 ## Success Criteria
 
 Treat this follow-up as successful when all of the following are true:
 
 1. a new runtime can be installed entirely through the file-manager path without public filesystem porcelain
-2. the installed file-backed runtime uses `/00/0d/00.lua` and `/00/0d/08.lua` for the same logical runtime assets now owned through `CONFIG`
+2. the installed file-backed runtime uses `/00/0d/00.cfg` and `/00/0d/08.cfg` for the same logical runtime assets now owned through `CONFIG`
 3. `runtime verify`, `runtime repair`, `runtime status`, and `runtime remove` all work through that backend
 4. the screen behaves the same on hardware as it did with the legacy slot-backed install

@@ -14,11 +14,11 @@ This checklist turns the decisions in `01` through `09` into an implementation s
 
 - Overall status: `in_progress`
 - Last completed step: `step 21`
-- In-progress step: `file-manager follow-up step 7`
-- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-25 after adding Step 7 software parity regression coverage to keep the slot-backed default runtime and the file-backed default-file-manager-poc runtime aligned on runtime assets, layer metadata, and compiled screen helper behavior)`
-- Last hardware validation: `2026-06-21 on Linux host: step 21 validation passed on /dev/ttyACM0 at dx=0 dy=0. runtime install default, runtime verify, and runtime status all reported exact-match compatible on installed runtime 2026-06-21-manifest-layers.1; screen set/activate validation confirmed persistent activation acceptance, slow/fast activation, fast-over-slow temporary priority, fallback from fast to slow to persistent, slow and fast timer restart behavior, lower-layer non-preemption while a higher layer remained active, and successful screen clear fallback for slow and fast.`
-- Open blockers: `hardware validation remains pending for the file-manager follow-up Step 1/Step 2 gates, plus the Step 4, Step 5, and Step 6 hardware validations for file-backed install, drift-detection/repair, and remove/uninstall behavior, and the Step 7 parity-validation hardware comparison between slot-backed and file-backed runtime installs`
-- Next session start point: `main implementation plan remains complete through step 21; for the file-manager follow-up, Step 7 now has software parity regression coverage in place, but its hardware parity validation and the earlier pending file-manager hardware gates still remain open in 15-file-manager-backed-runtime-plan.md`
+- In-progress step: `file-manager follow-up step 5`
+- Last verification run: `cargo fmt --check`, `cargo test`, `cargo check` (pass on 2026-06-26 after correcting module-files provisioning to store single-line wrapped .cfg files without a trailing newline, aligning the file-backed backend with the known-good Grid Editor runtime file shape)`
+- Last hardware validation: `2026-06-26 on Linux host at dx=0 dy=0: file-manager follow-up hardware validation confirmed the EVALUATE path plus module-file read/write end to end through runtime install default-file-manager-poc, runtime verify, and runtime status. The corrected module-files backend stored single-line wrapped cfg files at /00/0d/00.cfg and /00/0d/08.cfg, exact-match verification succeeded, and the user reported expected runtime functionality on hardware.`
+- Open blockers: `hardware validation remains pending for the file-manager follow-up Step 5 drift-detection/repair gate, the Step 6 remove/uninstall gate, and any remaining explicit Step 7 parity notes the next session wants to record after the file-backed runtime fix`
+- Next session start point: `main implementation plan remains complete through step 21; for the file-manager follow-up, Step 1, Step 2, and Step 4 hardware gates are now satisfied, and the next hardware step is Step 5 in 15-file-manager-backed-runtime-plan.md to introduce drift in /00/0d/08.cfg and validate runtime verify/repair before remove/uninstall coverage`
 
 ## Rules for every step
 
