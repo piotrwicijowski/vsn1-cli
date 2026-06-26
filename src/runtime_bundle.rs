@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::protocol::{frame_immediate_lua, GRID_MAX_LUA_BYTES};
+use crate::protocol::{frame_immediate_lua, frame_lua, GRID_MAX_LUA_BYTES};
 
 pub const BUNDLED_RUNTIME_NAME: &str = "default";
 
@@ -212,7 +212,7 @@ impl RuntimeBundle {
             .owned_slots
             .iter()
             .cloned()
-            .map(|slot| load_runtime_asset(&root, slot))
+            .map(|slot| load_runtime_asset(&root, manifest.provisioning_backend, slot))
             .collect::<Result<Vec<_>>>()?;
         assets.sort_by_key(|asset| asset.slot.install_order);
 
@@ -246,7 +246,7 @@ impl OwnedRuntimeSlot {
 
     pub fn derived_module_file_path(&self) -> String {
         format!(
-            "/{:02x}/{:02x}/{:02x}.lua",
+            "/{:02x}/{:02x}/{:02x}.cfg",
             self.page, self.element, self.event
         )
     }
@@ -514,16 +514,20 @@ fn validate_layers(manifest: &RuntimeBundleManifest) -> Result<()> {
     }
 }
 
-fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsset> {
+fn load_runtime_asset(
+    root: &Path,
+    provisioning_backend: RuntimeProvisioningBackend,
+    slot: OwnedRuntimeSlot,
+) -> Result<RuntimeAsset> {
     let source_path = resolve_asset_path(root, &slot.asset)?;
     let original_content =
         fs::read_to_string(&source_path).map_err(|error| RuntimeBundleError::ReadAsset {
             path: source_path.clone(),
             message: error.to_string(),
         })?;
-    let normalized_content = normalize_text_content(&original_content);
+    let normalized_content = normalize_runtime_script_content(&original_content);
     validate_installable_script_length(&slot, &normalized_content)?;
-    let stored_content = normalize_text_content(&frame_immediate_lua(&normalized_content));
+    let stored_content = stored_runtime_script_content(provisioning_backend, &normalized_content);
     let actual_hash = sha256_hex(stored_content.as_bytes());
 
     Ok(RuntimeAsset {
@@ -534,6 +538,43 @@ fn load_runtime_asset(root: &Path, slot: OwnedRuntimeSlot) -> Result<RuntimeAsse
         stored_content,
         normalized_sha256: actual_hash,
     })
+}
+
+fn normalize_runtime_script_content(content: &str) -> String {
+    let normalized = normalize_text_content(content);
+
+    if normalized.is_empty() {
+        String::new()
+    } else {
+        frame_immediate_lua(&normalized)
+    }
+}
+
+fn stored_runtime_script_content(
+    provisioning_backend: RuntimeProvisioningBackend,
+    normalized_content: &str,
+) -> String {
+    match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => {
+            normalize_text_content(&frame_immediate_lua(normalized_content))
+        }
+        RuntimeProvisioningBackend::ModuleFiles => {
+            if normalized_content.is_empty() {
+                String::new()
+            } else {
+                frame_lua(&compact_module_file_lua_body(normalized_content))
+            }
+        }
+    }
+}
+
+fn compact_module_file_lua_body(content: &str) -> String {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn resolve_asset_path(root: &Path, asset: &str) -> Result<PathBuf> {
@@ -873,13 +914,21 @@ normalized_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
                 .iter()
                 .map(|asset| asset.slot.derived_module_file_path())
                 .collect::<Vec<_>>(),
-            vec!["/00/0d/00.lua", "/00/0d/08.lua"]
+            vec!["/00/0d/00.cfg", "/00/0d/08.cfg"]
         );
         assert!(bundle
             .manifest()
             .fields
             .iter()
             .any(|field| field.name == "fast.action"));
+        assert!(bundle
+            .assets()
+            .iter()
+            .all(|asset| asset.stored_content.starts_with("<?lua --[[@cb]]")));
+        assert!(bundle
+            .assets()
+            .iter()
+            .all(|asset| !asset.stored_content.contains('\n')));
     }
 
     #[test]
@@ -906,26 +955,26 @@ normalized_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             file_manager_bundle
                 .assets()
                 .iter()
-                .map(|asset| {
-                    (
-                        asset.slot.name.as_str(),
-                        asset.normalized_content.as_str(),
-                        asset.stored_content.as_str(),
-                    )
-                })
+                .map(|asset| (asset.slot.name.as_str(), asset.normalized_content.as_str()))
                 .collect::<Vec<_>>(),
             default_bundle
                 .assets()
                 .iter()
-                .map(|asset| {
-                    (
-                        asset.slot.name.as_str(),
-                        asset.normalized_content.as_str(),
-                        asset.stored_content.as_str(),
-                    )
-                })
+                .map(|asset| (asset.slot.name.as_str(), asset.normalized_content.as_str()))
                 .collect::<Vec<_>>()
         );
+        assert!(default_bundle
+            .assets()
+            .iter()
+            .all(|asset| !asset.stored_content.starts_with("<?lua ")));
+        assert!(file_manager_bundle
+            .assets()
+            .iter()
+            .all(|asset| asset.stored_content.starts_with("<?lua --[[@cb]]")));
+        assert!(file_manager_bundle
+            .assets()
+            .iter()
+            .all(|asset| !asset.stored_content.contains('\n')));
     }
 
     #[test]

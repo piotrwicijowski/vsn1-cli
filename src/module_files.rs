@@ -277,7 +277,7 @@ mod tests {
     fn derives_lowercase_hex_module_file_paths_from_owned_slots() {
         let path = derive_owned_slot_module_file_path(&fixture_slot()).unwrap();
 
-        assert_eq!(path, "/00/0d/08.lua");
+        assert_eq!(path, "/00/0d/08.cfg");
     }
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(content.content, format!("{}tail", "a".repeat(50)));
         assert_eq!(content.source_target, GridTarget::new(0, 0));
         assert_eq!(evaluator.scripts.len(), 2);
-        assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.lua\",\"r\")"));
+        assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.cfg\",\"r\")"));
         assert!(evaluator.scripts[0].contains("f:seek(\"set\",0)"));
         assert!(evaluator.scripts[1].contains("f:seek(\"set\",50)"));
         assert!(evaluator.scripts[1].contains("f:read(50)"));
@@ -354,11 +354,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(evaluator.scripts.len(), 3);
-        assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.lua.tmp\",\"w\")"));
+        assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.cfg.tmp\",\"w\")"));
         assert!(evaluator.scripts[0].contains(&format!("f:write(\"{}\")", "a".repeat(50))));
-        assert!(evaluator.scripts[1].contains("io.open(\"/00/0d/08.lua.tmp\",\"a\")"));
+        assert!(evaluator.scripts[1].contains("io.open(\"/00/0d/08.cfg.tmp\",\"a\")"));
         assert!(evaluator.scripts[1].contains("f:write(\"tail\")"));
-        assert!(evaluator.scripts[2].contains("os.rename(\"/00/0d/08.lua.tmp\",\"/00/0d/08.lua\")"));
+        assert!(evaluator.scripts[2].contains("os.rename(\"/00/0d/08.cfg.tmp\",\"/00/0d/08.cfg\")"));
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(evaluator.scripts.len(), 2);
-        assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.lua.tmp\",\"w\")"));
+        assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.cfg.tmp\",\"w\")"));
         assert!(evaluator.scripts[0].contains("f:write(\"\")"));
     }
 
@@ -393,8 +393,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(evaluator.scripts.len(), 1);
-        assert!(evaluator.scripts[0].contains("os.remove(\"/00/0d/08.lua\")"));
-        assert!(evaluator.scripts[0].contains("os.remove(\"/00/0d/08.lua.tmp\")"));
+        assert!(evaluator.scripts[0].contains("os.remove(\"/00/0d/08.cfg\")"));
+        assert!(evaluator.scripts[0].contains("os.remove(\"/00/0d/08.cfg.tmp\")"));
     }
 
     #[test]

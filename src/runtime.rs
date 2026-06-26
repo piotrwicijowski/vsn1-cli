@@ -549,7 +549,7 @@ where
         target: ResolvedTarget,
         asset: &RuntimeAsset,
     ) -> Result<()> {
-        write_owned_slot_module_file_atomic(self, target, &asset.slot, &asset.normalized_content)
+        write_owned_slot_module_file_atomic(self, target, &asset.slot, &asset.stored_content)
     }
 
     fn clear_owned_module_file(
@@ -1061,7 +1061,10 @@ where
         }
     }
 
-    Ok(normalize_text_content(&read.content))
+    Ok(normalize_runtime_readback(
+        provisioning_backend,
+        &read.content,
+    ))
 }
 
 fn replace_directory_copy(source: &Path, destination: &Path) -> Result<()> {
@@ -1176,7 +1179,11 @@ where
                 }
             }
 
-            if normalized_sha256(&normalize_text_content(&read.content)) == cleared_slot_sha256 {
+            if normalized_sha256(&normalize_runtime_readback(
+                provisioning_backend,
+                &read.content,
+            )) == cleared_slot_sha256
+            {
                 continue;
             }
 
@@ -1220,11 +1227,9 @@ where
                         }
                     }
                     _ => {
-                        let actual_content = normalize_text_content(&read.content);
-                        let expected_content = expected_runtime_readback(
-                            provisioning_backend,
-                            &asset.normalized_content,
-                        );
+                        let actual_content =
+                            normalize_runtime_readback(provisioning_backend, &read.content);
+                        let expected_content = asset.stored_content.clone();
 
                         if actual_content == expected_content {
                             RuntimeSlotStatus::Match {
@@ -1637,8 +1642,35 @@ fn expected_runtime_readback(
 ) -> String {
     match provisioning_backend {
         RuntimeProvisioningBackend::ConfigSlots => expected_config_slot_readback(content),
-        RuntimeProvisioningBackend::ModuleFiles => normalize_text_content(content),
+        RuntimeProvisioningBackend::ModuleFiles => {
+            if normalize_text_content(content).is_empty() {
+                String::new()
+            } else {
+                protocol::frame_lua(&compact_module_file_runtime_body(content))
+            }
+        }
     }
+}
+
+fn normalize_runtime_readback(
+    provisioning_backend: RuntimeProvisioningBackend,
+    content: &str,
+) -> String {
+    match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => normalize_text_content(content),
+        RuntimeProvisioningBackend::ModuleFiles => {
+            content.replace("\r\n", "\n").replace('\r', "\n")
+        }
+    }
+}
+
+fn compact_module_file_runtime_body(content: &str) -> String {
+    protocol::frame_immediate_lua(content)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn push_unique_target(targets: &mut Vec<GridTarget>, target: GridTarget) {
@@ -1962,7 +1994,7 @@ mod tests {
                         asset.slot.name
                     ))
                 } else {
-                    asset.normalized_content.clone()
+                    asset.stored_content.clone()
                 };
 
                 self.module_files.insert(
@@ -2448,7 +2480,7 @@ install_order = 10
             "lcd-init".to_string(),
             RuntimeSlotRead {
                 source_target: GridTarget::new(0, 0),
-                content: "return 'pre-init file'\n".to_string(),
+                content: frame_lua("return 'pre-init file'\n"),
             },
         );
 
@@ -2474,7 +2506,7 @@ install_order = 10
                 .iter()
                 .find(|asset| asset.slot.name == "lcd-draw")
                 .unwrap()
-                .normalized_content
+                .stored_content
         );
 
         let backup_bundle = read_backup_bundle(storage.path());
@@ -2483,8 +2515,8 @@ install_order = 10
             RuntimeProvisioningBackend::ModuleFiles
         );
         assert_eq!(
-            backup_bundle.assets()[0].normalized_content,
-            "return 'pre-init file'\n"
+            backup_bundle.assets()[0].stored_content,
+            frame_lua("return 'pre-init file'\n")
         );
         assert_eq!(backup_bundle.assets()[1].normalized_content, "");
     }
@@ -2518,7 +2550,7 @@ install_order = 10
                 asset.slot.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
-                    content: asset.normalized_content.clone(),
+                    content: asset.stored_content.clone(),
                 },
             );
         }
@@ -2551,7 +2583,7 @@ install_order = 10
                 .iter()
                 .find(|asset| asset.slot.name == "lcd-draw")
                 .unwrap()
-                .normalized_content
+                .stored_content
         );
     }
 
@@ -2571,7 +2603,7 @@ install_order = 10
             reader.insert(
                 &asset.slot,
                 GridTarget::new(0, 0),
-                asset.normalized_content.clone(),
+                asset.stored_content.clone(),
             );
         }
 
@@ -2602,7 +2634,7 @@ install_order = 10
             let content = if asset.slot.name == "lcd-draw" {
                 "return 'drifted file content'\n".to_string()
             } else {
-                asset.normalized_content.clone()
+                asset.stored_content.clone()
             };
 
             reader.insert(&asset.slot, GridTarget::new(0, 0), content);
@@ -2640,7 +2672,7 @@ install_order = 10
         reader.insert(
             &init_asset.slot,
             GridTarget::new(0, 0),
-            init_asset.normalized_content.clone(),
+            init_asset.stored_content.clone(),
         );
 
         let report = inspect_runtime_with_bundle_dir(
@@ -2677,7 +2709,7 @@ install_order = 10
             "lcd-init".to_string(),
             RuntimeSlotRead {
                 source_target: GridTarget::new(0, 0),
-                content: "return 'drifted file init'\n".to_string(),
+                content: frame_lua("return 'drifted file init'\n"),
             },
         );
 
@@ -2705,7 +2737,7 @@ install_order = 10
                 .iter()
                 .find(|asset| asset.slot.name == "lcd-draw")
                 .unwrap()
-                .normalized_content
+                .stored_content
         );
     }
 
@@ -2945,7 +2977,7 @@ install_order = 10
                 asset.slot.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
-                    content: asset.normalized_content.clone(),
+                    content: asset.stored_content.clone(),
                 },
             );
         }
@@ -2978,7 +3010,7 @@ install_order = 10
                 .iter()
                 .find(|asset| asset.slot.name == "lcd-draw")
                 .unwrap()
-                .normalized_content
+                .stored_content
         );
     }
 
@@ -2999,7 +3031,7 @@ install_order = 10
                 asset.slot.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
-                    content: asset.normalized_content.clone(),
+                    content: asset.stored_content.clone(),
                 },
             );
         }
