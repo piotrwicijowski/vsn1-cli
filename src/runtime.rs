@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -8,7 +9,9 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::module_files::{
-    clear_owned_slot_module_file, read_owned_slot_module_file, write_owned_slot_module_file_atomic,
+    clear_owned_slot_module_file, module_file_read_step_estimate, module_file_write_step_count,
+    read_owned_slot_module_file, read_owned_slot_module_file_with_progress,
+    write_owned_slot_module_file_atomic, write_owned_slot_module_file_atomic_with_progress,
 };
 use crate::protocol::{
     self, ConfigFetch, ConfigLocation, ConfigWrite, EvaluateWrite, GridTarget, Heartbeat, LuaValue,
@@ -88,11 +91,31 @@ pub trait RuntimeModuleFileAccessor {
         slot: &OwnedRuntimeSlot,
     ) -> Result<Option<RuntimeSlotRead>>;
 
+    fn read_owned_module_file_with_progress(
+        &mut self,
+        target: ResolvedTarget,
+        slot: &OwnedRuntimeSlot,
+        on_step: &mut dyn FnMut(),
+    ) -> Result<Option<RuntimeSlotRead>> {
+        let _ = on_step;
+        self.read_owned_module_file(target, slot)
+    }
+
     fn write_owned_module_file(
         &mut self,
         target: ResolvedTarget,
         asset: &RuntimeAsset,
     ) -> Result<()>;
+
+    fn write_owned_module_file_with_progress(
+        &mut self,
+        target: ResolvedTarget,
+        asset: &RuntimeAsset,
+        on_step: &mut dyn FnMut(),
+    ) -> Result<()> {
+        let _ = on_step;
+        self.write_owned_module_file(target, asset)
+    }
 
     fn clear_owned_module_file(
         &mut self,
@@ -587,12 +610,36 @@ where
         read_owned_slot_module_file(self, target, slot)
     }
 
+    fn read_owned_module_file_with_progress(
+        &mut self,
+        target: ResolvedTarget,
+        slot: &OwnedRuntimeSlot,
+        on_step: &mut dyn FnMut(),
+    ) -> Result<Option<RuntimeSlotRead>> {
+        read_owned_slot_module_file_with_progress(self, target, slot, on_step)
+    }
+
     fn write_owned_module_file(
         &mut self,
         target: ResolvedTarget,
         asset: &RuntimeAsset,
     ) -> Result<()> {
         write_owned_slot_module_file_atomic(self, target, &asset.slot, &asset.stored_content)
+    }
+
+    fn write_owned_module_file_with_progress(
+        &mut self,
+        target: ResolvedTarget,
+        asset: &RuntimeAsset,
+        on_step: &mut dyn FnMut(),
+    ) -> Result<()> {
+        write_owned_slot_module_file_atomic_with_progress(
+            self,
+            target,
+            &asset.slot,
+            &asset.stored_content,
+            on_step,
+        )
     }
 
     fn clear_owned_module_file(
@@ -734,6 +781,115 @@ where
     }
 }
 
+struct RuntimeProvisioningProgressBar {
+    total_steps: usize,
+    completed_steps: usize,
+    phase: &'static str,
+    needs_newline: bool,
+}
+
+impl RuntimeProvisioningProgressBar {
+    fn for_bundle(bundle: &RuntimeBundle, capture_pre_install: bool) -> Option<Self> {
+        if bundle.manifest().provisioning_backend != RuntimeProvisioningBackend::ModuleFiles
+            || !io::stderr().is_terminal()
+        {
+            return None;
+        }
+
+        let asset_count = bundle.assets().len();
+        let backup_steps = if capture_pre_install {
+            bundle
+                .assets()
+                .iter()
+                .map(|asset| module_file_read_step_estimate(&asset.stored_content))
+                .sum()
+        } else {
+            0
+        };
+        let upload_steps = bundle
+            .assets()
+            .iter()
+            .map(|asset| module_file_write_step_count(&asset.stored_content))
+            .sum::<usize>();
+        let total_steps = backup_steps + upload_steps + 1 + asset_count;
+
+        Some(Self {
+            total_steps: total_steps.max(1),
+            completed_steps: 0,
+            phase: "starting",
+            needs_newline: false,
+        })
+    }
+
+    fn set_phase(&mut self, phase: &'static str) {
+        self.phase = phase;
+        self.render();
+    }
+
+    fn advance(&mut self, phase: &'static str) {
+        self.phase = phase;
+        self.completed_steps = self.completed_steps.saturating_add(1).min(self.total_steps);
+        self.render();
+    }
+
+    fn finish(&mut self) {
+        self.completed_steps = self.total_steps;
+        self.phase = "done";
+        self.render();
+        self.end_line();
+    }
+
+    fn render(&mut self) {
+        const BAR_WIDTH: usize = 24;
+
+        let filled = (self.completed_steps * BAR_WIDTH) / self.total_steps;
+        let bar = format!(
+            "{}{}",
+            "#".repeat(filled),
+            "-".repeat(BAR_WIDTH.saturating_sub(filled))
+        );
+        let percent = (self.completed_steps * 100) / self.total_steps;
+
+        eprint!(
+            "\r\x1b[2KRuntime provisioning [{bar}] {percent:>3}% ({}/{}) {}",
+            self.completed_steps, self.total_steps, self.phase
+        );
+        let _ = io::stderr().flush();
+        self.needs_newline = true;
+    }
+
+    fn end_line(&mut self) {
+        if self.needs_newline {
+            eprintln!();
+            self.needs_newline = false;
+        }
+    }
+}
+
+impl Drop for RuntimeProvisioningProgressBar {
+    fn drop(&mut self) {
+        self.end_line();
+    }
+}
+
+fn set_runtime_provisioning_phase(
+    progress: Option<&mut RuntimeProvisioningProgressBar>,
+    phase: &'static str,
+) {
+    if let Some(progress) = progress {
+        progress.set_phase(phase);
+    }
+}
+
+fn advance_runtime_provisioning_progress(
+    progress: Option<&mut RuntimeProvisioningProgressBar>,
+    phase: &'static str,
+) {
+    if let Some(progress) = progress {
+        progress.advance(phase);
+    }
+}
+
 fn install_runtime_bundle_with_storage<R>(
     bundle: &RuntimeBundle,
     requested_target: ResolvedTarget,
@@ -744,15 +900,29 @@ fn install_runtime_bundle_with_storage<R>(
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
+    let mut progress = RuntimeProvisioningProgressBar::for_bundle(bundle, capture_pre_install);
+
     if capture_pre_install {
-        write_pre_install_bundle(storage_root, bundle, requested_target, reader)?;
+        set_runtime_provisioning_phase(progress.as_mut(), "backing up existing runtime");
+        write_pre_install_bundle(
+            storage_root,
+            bundle,
+            requested_target,
+            reader,
+            progress.as_mut(),
+        )?;
     }
 
-    let report = install_runtime_bundle(bundle, requested_target, reader)?;
+    let report = install_runtime_bundle(bundle, requested_target, reader, progress.as_mut())?;
     replace_directory_copy(
         bundle.root(),
         &installed_runtime_dir_from_root(storage_root),
     )?;
+
+    if let Some(progress) = progress.as_mut() {
+        progress.finish();
+    }
+
     Ok(report)
 }
 
@@ -898,6 +1068,7 @@ fn install_runtime_bundle<R>(
     bundle: &RuntimeBundle,
     requested_target: ResolvedTarget,
     reader: &mut R,
+    mut progress: Option<&mut RuntimeProvisioningProgressBar>,
 ) -> Result<RuntimeInstallReport>
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
@@ -905,21 +1076,44 @@ where
     let mut stored_pages = Vec::new();
     let provisioning_backend = bundle.manifest().provisioning_backend;
 
+    set_runtime_provisioning_phase(progress.as_deref_mut(), "uploading runtime module files");
+
     for asset in bundle.assets() {
         if !stored_pages.contains(&asset.slot.page) {
             stored_pages.push(asset.slot.page);
         }
-        write_runtime_asset(provisioning_backend, requested_target, asset, reader)?;
+
+        match provisioning_backend {
+            RuntimeProvisioningBackend::ConfigSlots => {
+                write_runtime_asset(provisioning_backend, requested_target, asset, reader)?;
+            }
+            RuntimeProvisioningBackend::ModuleFiles => {
+                let mut on_step = || {
+                    advance_runtime_provisioning_progress(
+                        progress.as_deref_mut(),
+                        "uploading runtime module files",
+                    );
+                };
+                reader.write_owned_module_file_with_progress(
+                    requested_target,
+                    asset,
+                    &mut on_step,
+                )?;
+            }
+        }
     }
 
+    set_runtime_provisioning_phase(progress.as_deref_mut(), "activating runtime");
     finalize_runtime_write_activation(
         provisioning_backend,
         requested_target,
         &stored_pages,
         reader,
     )?;
+    advance_runtime_provisioning_progress(progress.as_deref_mut(), "activating runtime");
 
-    let verification_report = inspect_runtime_bundle(&bundle, requested_target, reader)?;
+    let verification_report =
+        inspect_runtime_bundle_with_progress(bundle, requested_target, reader, progress)?;
     if !verification_report.is_exact_match() {
         return Err(RuntimeError::verification_failed(format!(
             "post-install runtime is not an exact match: {}",
@@ -945,7 +1139,7 @@ fn restore_runtime_bundle<R>(
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
-    let report = install_runtime_bundle(bundle, requested_target, reader)?;
+    let report = install_runtime_bundle(bundle, requested_target, reader, None)?;
 
     Ok(RuntimeRemoveReport {
         removed_slots: report.installed_slots().to_vec(),
@@ -1011,6 +1205,7 @@ fn write_pre_install_bundle<R>(
     bundle: &RuntimeBundle,
     requested_target: ResolvedTarget,
     reader: &mut R,
+    mut progress: Option<&mut RuntimeProvisioningProgressBar>,
 ) -> Result<()>
 where
     R: RuntimeSlotReader + RuntimeModuleFileAccessor,
@@ -1027,11 +1222,18 @@ where
     })?;
 
     for asset in bundle.assets() {
+        let mut on_step = || {
+            advance_runtime_provisioning_progress(
+                progress.as_deref_mut(),
+                "backing up existing runtime",
+            );
+        };
         let content = read_slot_content_for_backup(
             bundle.manifest().provisioning_backend,
             requested_target,
             &asset.slot,
             reader,
+            &mut on_step,
         )?;
         let asset_path = staging_dir.join(&asset.slot.asset);
         fs::write(&asset_path, content).map_err(|error| {
@@ -1083,12 +1285,23 @@ fn read_slot_content_for_backup<R>(
     requested_target: ResolvedTarget,
     slot: &OwnedRuntimeSlot,
     reader: &mut R,
+    on_step: &mut dyn FnMut(),
 ) -> Result<String>
 where
     R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
-    let Some(read) = read_runtime_asset(provisioning_backend, requested_target, slot, reader)?
-    else {
+    let read = match provisioning_backend {
+        RuntimeProvisioningBackend::ConfigSlots => {
+            let read = read_runtime_asset(provisioning_backend, requested_target, slot, reader)?;
+            on_step();
+            read
+        }
+        RuntimeProvisioningBackend::ModuleFiles => {
+            reader.read_owned_module_file_with_progress(requested_target, slot, on_step)?
+        }
+    };
+
+    let Some(read) = read else {
         return Ok(String::new());
     };
 
@@ -1251,12 +1464,30 @@ fn inspect_runtime_bundle<R>(
 where
     R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
+    inspect_runtime_bundle_with_progress(bundle, requested_target, reader, None)
+}
+
+fn inspect_runtime_bundle_with_progress<R>(
+    bundle: &RuntimeBundle,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+    mut progress: Option<&mut RuntimeProvisioningProgressBar>,
+) -> Result<RuntimeInspectionReport>
+where
+    R: RuntimeSlotReader + RuntimeModuleFileAccessor,
+{
     let mut slot_inspections = Vec::with_capacity(bundle.assets().len());
     let mut observed_targets = Vec::new();
     let provisioning_backend = bundle.manifest().provisioning_backend;
 
+    set_runtime_provisioning_phase(progress.as_deref_mut(), "verifying installed runtime");
+
     for asset in bundle.assets() {
         let read = read_runtime_asset(provisioning_backend, requested_target, &asset.slot, reader)?;
+        advance_runtime_provisioning_progress(
+            progress.as_deref_mut(),
+            "verifying installed runtime",
+        );
 
         let status = match read {
             None => RuntimeSlotStatus::Missing,

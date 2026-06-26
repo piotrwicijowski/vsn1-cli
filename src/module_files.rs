@@ -49,6 +49,18 @@ pub(crate) fn read_owned_slot_module_file<E>(
 where
     E: ModuleFileEvaluator,
 {
+    read_owned_slot_module_file_with_progress(evaluator, target, slot, &mut || {})
+}
+
+pub(crate) fn read_owned_slot_module_file_with_progress<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    slot: &OwnedRuntimeSlot,
+    on_step: &mut dyn FnMut(),
+) -> Result<Option<RuntimeSlotRead>>
+where
+    E: ModuleFileEvaluator,
+{
     let path = derive_owned_slot_module_file_path(slot)?;
     let mut content = String::new();
     let mut offset = 0usize;
@@ -70,6 +82,7 @@ where
 
         if !exists {
             if offset == 0 {
+                on_step();
                 return Ok(None);
             }
 
@@ -81,6 +94,7 @@ where
 
         offset += chunk.len();
         content.push_str(&chunk);
+        on_step();
 
         if chunk.len() < READ_CHUNK_SIZE {
             return Ok(Some(RuntimeSlotRead {
@@ -92,11 +106,30 @@ where
     }
 }
 
+pub(crate) fn module_file_read_step_estimate(content: &str) -> usize {
+    chunk_bytes(content.as_bytes(), READ_CHUNK_SIZE)
+        .len()
+        .max(1)
+}
+
 pub(crate) fn write_owned_slot_module_file_atomic<E>(
     evaluator: &mut E,
     target: ResolvedTarget,
     slot: &OwnedRuntimeSlot,
     content: &str,
+) -> Result<()>
+where
+    E: ModuleFileEvaluator,
+{
+    write_owned_slot_module_file_atomic_with_progress(evaluator, target, slot, content, &mut || {})
+}
+
+pub(crate) fn write_owned_slot_module_file_atomic_with_progress<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    slot: &OwnedRuntimeSlot,
+    content: &str,
+    on_step: &mut dyn FnMut(),
 ) -> Result<()>
 where
     E: ModuleFileEvaluator,
@@ -115,6 +148,7 @@ where
             &format!("module file chunk write for {}", tmp_path),
             &report.values,
         )?;
+        on_step();
     }
 
     let report = evaluator.evaluate_lua(target, &build_commit_write_lua(&tmp_path, &path))?;
@@ -122,8 +156,13 @@ where
         &format!("module file rename from {} to {}", tmp_path, path),
         &report.values,
     )?;
+    on_step();
 
     Ok(())
+}
+
+pub(crate) fn module_file_write_step_count(content: &str) -> usize {
+    chunk_bytes(content.as_bytes(), WRITE_CHUNK_SIZE).len() + 1
 }
 
 pub(crate) fn clear_owned_slot_module_file<E>(
@@ -338,6 +377,49 @@ mod tests {
     }
 
     #[test]
+    fn reports_progress_for_each_read_chunk() {
+        let mut evaluator = RecordingEvaluator::default();
+        evaluator.push_response(vec![
+            LuaValue::Boolean(true),
+            LuaValue::String("a".repeat(50)),
+        ]);
+        evaluator.push_response(vec![
+            LuaValue::Boolean(true),
+            LuaValue::String("tail".to_string()),
+        ]);
+
+        let mut steps = 0;
+        let content = read_owned_slot_module_file_with_progress(
+            &mut evaluator,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &fixture_slot(),
+            &mut || steps += 1,
+        )
+        .unwrap();
+
+        assert_eq!(content.unwrap().content, format!("{}tail", "a".repeat(50)));
+        assert_eq!(steps, 2);
+    }
+
+    #[test]
+    fn reports_progress_when_module_file_is_missing() {
+        let mut evaluator = RecordingEvaluator::default();
+        evaluator.push_response(vec![LuaValue::Boolean(false), LuaValue::Nil]);
+
+        let mut steps = 0;
+        let content = read_owned_slot_module_file_with_progress(
+            &mut evaluator,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &fixture_slot(),
+            &mut || steps += 1,
+        )
+        .unwrap();
+
+        assert_eq!(content, None);
+        assert_eq!(steps, 1);
+    }
+
+    #[test]
     fn writes_module_files_in_chunked_temp_file_appends_then_renames() {
         let mut evaluator = RecordingEvaluator::default();
         evaluator.push_response(vec![LuaValue::Boolean(true)]);
@@ -378,6 +460,27 @@ mod tests {
         assert_eq!(evaluator.scripts.len(), 2);
         assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.cfg.tmp\",\"w\")"));
         assert!(evaluator.scripts[0].contains("f:write(\"\")"));
+    }
+
+    #[test]
+    fn reports_progress_for_each_chunk_write_and_commit() {
+        let mut evaluator = RecordingEvaluator::default();
+        evaluator.push_response(vec![LuaValue::Boolean(true)]);
+        evaluator.push_response(vec![LuaValue::Boolean(true)]);
+        evaluator.push_response(vec![LuaValue::Boolean(true)]);
+
+        let mut steps = 0;
+        let content = format!("{}tail", "a".repeat(50));
+        write_owned_slot_module_file_atomic_with_progress(
+            &mut evaluator,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &fixture_slot(),
+            &content,
+            &mut || steps += 1,
+        )
+        .unwrap();
+
+        assert_eq!(steps, module_file_write_step_count(&content));
     }
 
     #[test]
