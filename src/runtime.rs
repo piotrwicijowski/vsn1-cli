@@ -30,6 +30,8 @@ const PAGE_CHANGE_SETTLE_DELAY: Duration = Duration::from_millis(150);
 const HEARTBEAT_BOOTSTRAP_DELAY: Duration = Duration::from_millis(300);
 const READ_BACK_TOTAL_WINDOW: Duration = Duration::from_millis(1200);
 const READ_BACK_IDLE_WINDOW: Duration = Duration::from_millis(250);
+const EVALUATE_READ_BACK_TOTAL_WINDOW: Duration = Duration::from_millis(1000);
+const EVALUATE_MATCH_GRACE_WINDOW: Duration = Duration::from_millis(60);
 const PAGE_STORE_TOTAL_WINDOW: Duration = Duration::from_millis(8000);
 const PAGE_STORE_IDLE_WINDOW: Duration = Duration::from_millis(500);
 const READ_BACK_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -467,13 +469,13 @@ where
         })?;
         self.transport.write_config(&page_store_packet)?;
 
-        let inbound = read_transport_until_idle(
+        read_transport_until_page_ack(
             &mut self.transport,
+            target,
             PAGE_STORE_TOTAL_WINDOW,
-            PAGE_STORE_IDLE_WINDOW,
-        )?;
-
-        extract_page_store_ack(&inbound, target)
+            extract_page_store_ack,
+            "no PAGESTORE acknowledge was observed in read-back",
+        )
     }
 
     pub fn send_page_discard(&mut self, target: ResolvedTarget) -> Result<()> {
@@ -485,13 +487,13 @@ where
         })?;
         self.transport.write_config(&page_discard_packet)?;
 
-        let inbound = read_transport_until_idle(
+        read_transport_until_page_ack(
             &mut self.transport,
+            target,
             PAGE_STORE_TOTAL_WINDOW,
-            PAGE_STORE_IDLE_WINDOW,
-        )?;
-
-        extract_page_discard_ack(&inbound, target)
+            extract_page_discard_ack,
+            "no PAGEDISCARD acknowledge was observed in read-back",
+        )
     }
 
     pub fn evaluate_lua(
@@ -501,20 +503,20 @@ where
     ) -> Result<RuntimeEvaluateReport> {
         self.transport.clear_input()?;
 
+        let identity = self.next_identity();
+
         let packet = protocol::encode_evaluate_packet(&EvaluateWrite {
             target: target.grid_target(),
             lua,
-            identity: self.next_identity(),
+            identity,
         })?;
         self.transport.write_evaluate(&packet)?;
 
-        let inbound = read_transport_until_idle(
+        read_transport_until_matching_evaluate_report(
             &mut self.transport,
-            READ_BACK_TOTAL_WINDOW,
-            READ_BACK_IDLE_WINDOW,
-        )?;
-
-        extract_single_evaluate_report(&inbound, target)
+            target,
+            EVALUATE_READ_BACK_TOTAL_WINDOW,
+        )
     }
 }
 
@@ -1799,6 +1801,88 @@ fn read_transport_until_idle(
     Ok(inbound)
 }
 
+fn read_transport_until_matching_evaluate_report(
+    transport: &mut impl SerialTransport,
+    requested_target: ResolvedTarget,
+    total_window: Duration,
+) -> Result<RuntimeEvaluateReport> {
+    let started_at = std::time::Instant::now();
+    let mut matched_at: Option<std::time::Instant> = None;
+    let mut inbound = Vec::new();
+    let mut buffer = [0u8; 1024];
+
+    loop {
+        if let Ok(report) = extract_single_evaluate_report(&inbound, requested_target) {
+            if matched_at
+                .is_some_and(|matched_at| matched_at.elapsed() >= EVALUATE_MATCH_GRACE_WINDOW)
+            {
+                return Ok(report);
+            }
+
+            matched_at.get_or_insert_with(std::time::Instant::now);
+        }
+
+        if started_at.elapsed() >= total_window {
+            return extract_single_evaluate_report(&inbound, requested_target);
+        }
+
+        let available = transport.bytes_to_read()? as usize;
+        if available == 0 {
+            thread::sleep(READ_BACK_POLL_INTERVAL);
+            continue;
+        }
+
+        let target_len = available.min(buffer.len());
+        let read_len = transport.read(&mut buffer[..target_len])?;
+        if read_len == 0 {
+            thread::sleep(READ_BACK_POLL_INTERVAL);
+            continue;
+        }
+
+        inbound.extend_from_slice(&buffer[..read_len]);
+        matched_at = None;
+    }
+}
+
+fn read_transport_until_page_ack(
+    transport: &mut impl SerialTransport,
+    requested_target: ResolvedTarget,
+    total_window: Duration,
+    extract_ack: fn(&[u8], ResolvedTarget) -> Result<()>,
+    pending_message: &str,
+) -> Result<()> {
+    let started_at = std::time::Instant::now();
+    let mut inbound = Vec::new();
+    let mut buffer = [0u8; 1024];
+
+    loop {
+        match extract_ack(&inbound, requested_target) {
+            Ok(()) => return Ok(()),
+            Err(RuntimeError::UnexpectedResponse { message }) if message == pending_message => {}
+            Err(error) => return Err(error),
+        }
+
+        if started_at.elapsed() >= total_window {
+            return extract_ack(&inbound, requested_target);
+        }
+
+        let available = transport.bytes_to_read()? as usize;
+        if available == 0 {
+            thread::sleep(READ_BACK_POLL_INTERVAL);
+            continue;
+        }
+
+        let target_len = available.min(buffer.len());
+        let read_len = transport.read(&mut buffer[..target_len])?;
+        if read_len == 0 {
+            thread::sleep(READ_BACK_POLL_INTERVAL);
+            continue;
+        }
+
+        inbound.extend_from_slice(&buffer[..read_len]);
+    }
+}
+
 fn extract_single_config_report(
     inbound: &[u8],
     slot: &OwnedRuntimeSlot,
@@ -1896,8 +1980,10 @@ fn extract_page_store_ack(inbound: &[u8], requested_target: ResolvedTarget) -> R
             }
 
             match parse_ascii_hex_range(block, 4, 1) {
-                Some(GRID_INSTR_ACKNOWLEDGE) => acknowledgements.push(source_target),
-                Some(GRID_INSTR_NACKNOWLEDGE) => rejections.push(source_target),
+                Some(GRID_INSTR_ACKNOWLEDGE) => {
+                    push_unique_target(&mut acknowledgements, source_target)
+                }
+                Some(GRID_INSTR_NACKNOWLEDGE) => push_unique_target(&mut rejections, source_target),
                 _ => {}
             }
         }
@@ -1953,8 +2039,10 @@ fn extract_page_discard_ack(inbound: &[u8], requested_target: ResolvedTarget) ->
             }
 
             match parse_ascii_hex_range(block, 4, 1) {
-                Some(GRID_INSTR_ACKNOWLEDGE) => acknowledgements.push(source_target),
-                Some(GRID_INSTR_NACKNOWLEDGE) => rejections.push(source_target),
+                Some(GRID_INSTR_ACKNOWLEDGE) => {
+                    push_unique_target(&mut acknowledgements, source_target)
+                }
+                Some(GRID_INSTR_NACKNOWLEDGE) => push_unique_target(&mut rejections, source_target),
                 _ => {}
             }
         }
@@ -2018,35 +2106,49 @@ fn extract_single_evaluate_report(
         }
     }
 
-    let mut unique_reports = Vec::new();
-    for report in reports {
-        if !unique_reports.iter().any(|existing| existing == &report) {
-            unique_reports.push(report);
-        }
-    }
+    match requested_target {
+        ResolvedTarget::Explicit(expected) => {
+            let matching_reports = reports
+                .iter()
+                .filter(|report| report.source_target == expected)
+                .cloned()
+                .collect::<Vec<_>>();
 
-    match unique_reports.as_slice() {
-        [] => Err(RuntimeError::unexpected_response(
-            "no EVALUATE report was observed in read-back",
-        )),
-        [report] => match requested_target {
-            ResolvedTarget::Explicit(expected) if report.source_target != expected => {
-                Err(RuntimeError::verification_failed(format!(
+            if let Some(report) = matching_reports.last() {
+                return Ok(report.clone());
+            }
+
+            if let Some(report) = reports.first() {
+                return Err(RuntimeError::verification_failed(format!(
                     "evaluate response came back from dx={} dy={} instead of the requested target",
                     report.source_target.dx, report.source_target.dy
-                )))
+                )));
             }
-            _ => Ok(report.clone()),
-        },
-        reports => Err(RuntimeError::unexpected_response(format!(
-            "multiple EVALUATE reports were returned ({})",
-            format_targets(
-                &reports
-                    .iter()
-                    .map(|report| report.source_target)
-                    .collect::<Vec<_>>()
-            )
-        ))),
+
+            Err(RuntimeError::unexpected_response(
+                "no EVALUATE report was observed in read-back",
+            ))
+        }
+        ResolvedTarget::Broadcast => {
+            let mut unique_targets = Vec::new();
+            for report in &reports {
+                push_unique_target(&mut unique_targets, report.source_target);
+            }
+
+            match unique_targets.as_slice() {
+                [] => Err(RuntimeError::unexpected_response(
+                    "no EVALUATE report was observed in read-back",
+                )),
+                [_] => Ok(reports
+                    .last()
+                    .expect("broadcast evaluate reports should contain one report")
+                    .clone()),
+                targets => Err(RuntimeError::unexpected_response(format!(
+                    "multiple EVALUATE reports were returned ({})",
+                    format_targets(targets)
+                ))),
+            }
+        }
     }
 }
 
@@ -2267,9 +2369,44 @@ mod tests {
     }
 
     #[test]
+    fn extract_single_evaluate_report_prefers_the_last_matching_explicit_target_response() {
+        let stale = evaluate_response_frame(GridTarget::new(0, 0), b"\x02086d00010300011\x03\x04");
+        let current =
+            evaluate_response_frame(GridTarget::new(0, 0), b"\x02086d00010300013\x03\x04");
+        let mut inbound = stale;
+        inbound.extend_from_slice(&current);
+
+        let report = extract_single_evaluate_report(
+            &inbound,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+        )
+        .unwrap();
+
+        assert_eq!(report.source_target, GridTarget::new(0, 0));
+        assert_eq!(report.values, vec![LuaValue::Number(3.0)]);
+    }
+
+    #[test]
+    fn extract_single_evaluate_report_accepts_multiple_same_target_broadcast_responses() {
+        let first = evaluate_response_frame(GridTarget::new(0, 0), b"\x02086d00010300011\x03\x04");
+        let second = evaluate_response_frame(GridTarget::new(0, 0), b"\x02086d00010300012\x03\x04");
+        let mut inbound = first;
+        inbound.extend_from_slice(&second);
+
+        let report = extract_single_evaluate_report(&inbound, ResolvedTarget::Broadcast).unwrap();
+
+        assert_eq!(report.source_target, GridTarget::new(0, 0));
+        assert_eq!(report.values, vec![LuaValue::Number(2.0)]);
+    }
+
+    #[test]
     fn transport_runtime_slot_reader_sends_page_store_and_accepts_ack() {
         let mut transport = FakeTransport::default();
-        transport.queue_read_data(grid_frame(GridTarget::new(0, 0), b"\x02061a\x03\x04"));
+        transport.queue_read_data(grid_frame(
+            GridTarget::new(0, 0),
+            PacketIdentity::new(1, 1),
+            b"\x02061a\x03\x04",
+        ));
 
         let mut reader = TransportRuntimeSlotReader::new(transport).unwrap();
         reader
@@ -2284,7 +2421,11 @@ mod tests {
     #[test]
     fn transport_runtime_slot_reader_sends_page_discard_and_accepts_ack() {
         let mut transport = FakeTransport::default();
-        transport.queue_read_data(grid_frame(GridTarget::new(0, 0), b"\x02063a\x03\x04"));
+        transport.queue_read_data(grid_frame(
+            GridTarget::new(0, 0),
+            PacketIdentity::new(1, 1),
+            b"\x02063a\x03\x04",
+        ));
 
         let mut reader = TransportRuntimeSlotReader::new(transport).unwrap();
         reader
@@ -2296,16 +2437,39 @@ mod tests {
         assert_eq!(&transport.config_writes()[0][24..28], b"063e");
     }
 
+    #[test]
+    fn extract_page_discard_ack_accepts_duplicate_same_target_acknowledgements() {
+        let first = grid_frame(
+            GridTarget::new(0, 0),
+            PacketIdentity::new(1, 1),
+            b"\x02063a\x03\x04",
+        );
+        let second = grid_frame(
+            GridTarget::new(0, 0),
+            PacketIdentity::new(1, 2),
+            b"\x02063a\x03\x04",
+        );
+        let mut inbound = first;
+        inbound.extend_from_slice(&second);
+
+        extract_page_discard_ack(&inbound, ResolvedTarget::Explicit(GridTarget::new(0, 0)))
+            .unwrap();
+    }
+
     #[derive(Default)]
     struct StaticSlotReader {
         slots: BTreeMap<String, RuntimeSlotRead>,
     }
 
-    fn grid_frame(source_target: GridTarget, class_block: &[u8]) -> Vec<u8> {
+    fn grid_frame(
+        source_target: GridTarget,
+        identity: PacketIdentity,
+        class_block: &[u8],
+    ) -> Vec<u8> {
         let mut packet = vec![0x01, 0x0f];
         push_ascii_hex(&mut packet, 4, 0);
-        push_ascii_hex(&mut packet, 2, 1);
-        push_ascii_hex(&mut packet, 2, 1);
+        push_ascii_hex(&mut packet, 2, identity.message_id as usize);
+        push_ascii_hex(&mut packet, 2, identity.session_id as usize);
         push_ascii_hex(&mut packet, 2, (source_target.dx + 127) as usize);
         push_ascii_hex(&mut packet, 2, (source_target.dy + 127) as usize);
         push_ascii_hex(&mut packet, 2, 0);
@@ -2326,7 +2490,15 @@ mod tests {
     }
 
     fn evaluate_response_frame(source_target: GridTarget, class_block: &[u8]) -> Vec<u8> {
-        grid_frame(source_target, class_block)
+        evaluate_response_frame_with_identity(source_target, PacketIdentity::new(1, 1), class_block)
+    }
+
+    fn evaluate_response_frame_with_identity(
+        source_target: GridTarget,
+        identity: PacketIdentity,
+        class_block: &[u8],
+    ) -> Vec<u8> {
+        grid_frame(source_target, identity, class_block)
     }
 
     fn push_ascii_hex(buffer: &mut Vec<u8>, width: usize, value: usize) {

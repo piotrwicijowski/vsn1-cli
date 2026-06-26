@@ -10,8 +10,13 @@ use crate::runtime_bundle::{RuntimeOwnedAsset, RuntimeOwnedAssetLocation};
 use crate::targeting::ResolvedTarget;
 use crate::transport::SerialTransport;
 
-const READ_CHUNK_SIZE: usize = 50;
-const WRITE_CHUNK_SIZE: usize = 50;
+// Read requests carry only the path plus an offset/count, so they can use a
+// larger chunk size than Grid Editor's provisional 50-byte constant.
+const READ_CHUNK_SIZE: usize = 512;
+
+// Write requests embed the escaped chunk payload into the EVALUATE Lua, so keep
+// them smaller than reads while still materially reducing round trips.
+const WRITE_CHUNK_SIZE: usize = 64;
 
 pub(crate) trait ModuleFileEvaluator {
     fn evaluate_lua(&mut self, target: ResolvedTarget, lua: &str) -> Result<RuntimeEvaluateReport>;
@@ -364,7 +369,7 @@ mod tests {
         let mut evaluator = RecordingEvaluator::default();
         evaluator.push_response(vec![
             LuaValue::Boolean(true),
-            LuaValue::String("a".repeat(50)),
+            LuaValue::String("a".repeat(READ_CHUNK_SIZE)),
         ]);
         evaluator.push_response(vec![
             LuaValue::Boolean(true),
@@ -379,13 +384,16 @@ mod tests {
         .unwrap();
 
         let content = content.unwrap();
-        assert_eq!(content.content, format!("{}tail", "a".repeat(50)));
+        assert_eq!(
+            content.content,
+            format!("{}tail", "a".repeat(READ_CHUNK_SIZE))
+        );
         assert_eq!(content.source_target, GridTarget::new(0, 0));
         assert_eq!(evaluator.scripts.len(), 2);
         assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.cfg\",\"r\")"));
         assert!(evaluator.scripts[0].contains("f:seek(\"set\",0)"));
-        assert!(evaluator.scripts[1].contains("f:seek(\"set\",50)"));
-        assert!(evaluator.scripts[1].contains("f:read(50)"));
+        assert!(evaluator.scripts[1].contains(&format!("f:seek(\"set\",{READ_CHUNK_SIZE})")));
+        assert!(evaluator.scripts[1].contains(&format!("f:read({READ_CHUNK_SIZE})")));
     }
 
     #[test]
@@ -408,7 +416,7 @@ mod tests {
         let mut evaluator = RecordingEvaluator::default();
         evaluator.push_response(vec![
             LuaValue::Boolean(true),
-            LuaValue::String("a".repeat(50)),
+            LuaValue::String("a".repeat(READ_CHUNK_SIZE)),
         ]);
         evaluator.push_response(vec![
             LuaValue::Boolean(true),
@@ -424,7 +432,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(content.unwrap().content, format!("{}tail", "a".repeat(50)));
+        assert_eq!(
+            content.unwrap().content,
+            format!("{}tail", "a".repeat(READ_CHUNK_SIZE))
+        );
         assert_eq!(steps, 2);
     }
 
@@ -453,7 +464,7 @@ mod tests {
         evaluator.push_response(vec![LuaValue::Boolean(true)]);
         evaluator.push_response(vec![LuaValue::Boolean(true)]);
 
-        let content = format!("{}tail", "a".repeat(50));
+        let content = format!("{}tail", "a".repeat(WRITE_CHUNK_SIZE));
         write_owned_slot_module_file_atomic(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
@@ -464,7 +475,8 @@ mod tests {
 
         assert_eq!(evaluator.scripts.len(), 3);
         assert!(evaluator.scripts[0].contains("io.open(\"/00/0d/08.cfg.tmp\",\"w\")"));
-        assert!(evaluator.scripts[0].contains(&format!("f:write(\"{}\")", "a".repeat(50))));
+        assert!(evaluator.scripts[0]
+            .contains(&format!("f:write(\"{}\")", "a".repeat(WRITE_CHUNK_SIZE))));
         assert!(evaluator.scripts[1].contains("io.open(\"/00/0d/08.cfg.tmp\",\"a\")"));
         assert!(evaluator.scripts[1].contains("f:write(\"tail\")"));
         assert!(evaluator.scripts[2].contains("os.rename(\"/00/0d/08.cfg.tmp\",\"/00/0d/08.cfg\")"));
@@ -497,7 +509,7 @@ mod tests {
         evaluator.push_response(vec![LuaValue::Boolean(true)]);
 
         let mut steps = 0;
-        let content = format!("{}tail", "a".repeat(50));
+        let content = format!("{}tail", "a".repeat(WRITE_CHUNK_SIZE));
         write_owned_slot_module_file_atomic_with_progress(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
