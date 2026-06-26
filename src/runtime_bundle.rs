@@ -732,15 +732,23 @@ install_order = 10
     }
 
     #[test]
-    fn media_runtime_manifest_and_assets_load() {
+    fn media_runtime_manifest_and_assets_load_with_module_files_backend() {
         let bundle =
             RuntimeBundle::load_from_dir(bundled_runtime_root_dir().join("media")).unwrap();
 
         assert_eq!(
             bundle.manifest().provisioning_backend,
-            RuntimeProvisioningBackend::ConfigSlots
+            RuntimeProvisioningBackend::ModuleFiles
         );
         assert_eq!(bundle.assets().len(), 2);
+        assert_eq!(
+            bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.slot.derived_module_file_path())
+                .collect::<Vec<_>>(),
+            vec!["/00/0d/00.cfg", "/00/0d/08.cfg"]
+        );
         assert_eq!(
             bundle
                 .manifest()
@@ -770,6 +778,8 @@ install_order = 10
 
         for asset in bundle.assets() {
             assert!(frame_immediate_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
+            assert!(asset.stored_content.starts_with("<?lua --[[@cb]]"));
+            assert!(!asset.stored_content.contains('\n'));
         }
     }
 
