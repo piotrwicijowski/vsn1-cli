@@ -708,6 +708,74 @@ notes = "fixture"
     }
 
     #[test]
+    fn file_manager_runtime_variant_compiles_the_same_screen_helpers_as_default() {
+        let default_registry = ScreenFieldRegistry::bundled().unwrap();
+        let file_manager_registry = ScreenFieldRegistry::from_bundle(
+            &RuntimeBundle::load_from_dir(
+                crate::runtime_bundle::bundled_runtime_root_dir().join("default-file-manager-poc"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let default_assignments = default_registry
+            .parse_assignments(["persistent.title=Tempo", "slow.message=Disk almost full"])
+            .unwrap();
+        let file_manager_assignments = file_manager_registry
+            .parse_assignments(["persistent.title=Tempo", "slow.message=Disk almost full"])
+            .unwrap();
+
+        assert_eq!(
+            default_registry
+                .layers()
+                .iter()
+                .map(|layer| {
+                    (
+                        layer.name().as_str(),
+                        layer.activation(),
+                        layer.timeout_ms(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            file_manager_registry
+                .layers()
+                .iter()
+                .map(|layer| {
+                    (
+                        layer.name().as_str(),
+                        layer.activation(),
+                        layer.timeout_ms(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            default_registry
+                .fields()
+                .iter()
+                .map(|field| field.public_name())
+                .collect::<Vec<_>>(),
+            file_manager_registry
+                .fields()
+                .iter()
+                .map(|field| field.public_name())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            compile_set_lua(&default_assignments, Some(&ScreenLayer::new("slow"))).unwrap(),
+            compile_set_lua(&file_manager_assignments, Some(&ScreenLayer::new("slow"))).unwrap()
+        );
+        assert_eq!(
+            compile_clear_lua(&default_registry, &ScreenLayer::new("persistent")).unwrap(),
+            compile_clear_lua(&file_manager_registry, &ScreenLayer::new("persistent")).unwrap()
+        );
+        assert_eq!(
+            compile_activate_lua(&ScreenLayer::new("fast")).unwrap(),
+            "activate_layer('fast')"
+        );
+    }
+
+    #[test]
     fn installed_registry_requires_runtime_copy() {
         let error = ScreenFieldRegistry::from_optional_runtime_dir(None).unwrap_err();
 

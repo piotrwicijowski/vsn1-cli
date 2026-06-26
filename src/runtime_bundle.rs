@@ -883,6 +883,52 @@ normalized_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     }
 
     #[test]
+    fn file_manager_proof_runtime_matches_default_runtime_assets_and_metadata() {
+        let default_bundle = RuntimeBundle::bundled().unwrap();
+        let file_manager_bundle = RuntimeBundle::load_from_dir(
+            bundled_runtime_root_dir().join("default-file-manager-poc"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            file_manager_bundle.manifest().layers,
+            default_bundle.manifest().layers
+        );
+        assert_eq!(
+            file_manager_bundle.manifest().owned_slots,
+            default_bundle.manifest().owned_slots
+        );
+        assert_eq!(
+            file_manager_bundle.manifest().fields,
+            default_bundle.manifest().fields
+        );
+        assert_eq!(
+            file_manager_bundle
+                .assets()
+                .iter()
+                .map(|asset| {
+                    (
+                        asset.slot.name.as_str(),
+                        asset.normalized_content.as_str(),
+                        asset.stored_content.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            default_bundle
+                .assets()
+                .iter()
+                .map(|asset| {
+                    (
+                        asset.slot.name.as_str(),
+                        asset.normalized_content.as_str(),
+                        asset.stored_content.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_field_inventory_entries() {
         let fixture = tempdir().unwrap();
         let root = fixture.path();
