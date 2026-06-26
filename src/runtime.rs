@@ -19,7 +19,7 @@ use crate::protocol::{
 };
 use crate::runtime_bundle::{
     normalize_text_content, normalized_sha256, OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle,
-    RuntimeBundleError, RuntimeLayerSpec, RuntimeProvisioningBackend,
+    RuntimeBundleError, RuntimeLayerSpec, RuntimeOwnedAsset, RuntimeProvisioningBackend,
 };
 use crate::targeting::ResolvedTarget;
 use crate::transport::{SerialTransport, TransportError};
@@ -88,17 +88,17 @@ pub trait RuntimeModuleFileAccessor {
     fn read_owned_module_file(
         &mut self,
         target: ResolvedTarget,
-        slot: &OwnedRuntimeSlot,
+        asset: &RuntimeOwnedAsset,
     ) -> Result<Option<RuntimeSlotRead>>;
 
     fn read_owned_module_file_with_progress(
         &mut self,
         target: ResolvedTarget,
-        slot: &OwnedRuntimeSlot,
+        asset: &RuntimeOwnedAsset,
         on_step: &mut dyn FnMut(),
     ) -> Result<Option<RuntimeSlotRead>> {
         let _ = on_step;
-        self.read_owned_module_file(target, slot)
+        self.read_owned_module_file(target, asset)
     }
 
     fn write_owned_module_file(
@@ -120,7 +120,7 @@ pub trait RuntimeModuleFileAccessor {
     fn clear_owned_module_file(
         &mut self,
         target: ResolvedTarget,
-        slot: &OwnedRuntimeSlot,
+        asset: &RuntimeOwnedAsset,
     ) -> Result<()>;
 }
 
@@ -134,7 +134,7 @@ pub enum RuntimeSlotStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSlotInspection {
-    pub slot: OwnedRuntimeSlot,
+    pub asset: RuntimeOwnedAsset,
     pub status: RuntimeSlotStatus,
 }
 
@@ -147,7 +147,7 @@ pub struct RuntimeInspectionReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeInstallReport {
-    installed_slots: Vec<OwnedRuntimeSlot>,
+    installed_assets: Vec<RuntimeOwnedAsset>,
     verification_report: RuntimeInspectionReport,
 }
 
@@ -158,7 +158,7 @@ pub struct RuntimeUpgradeReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeRemoveReport {
-    removed_slots: Vec<OwnedRuntimeSlot>,
+    removed_assets: Vec<RuntimeOwnedAsset>,
     restored_from_backup: bool,
     warning: Option<String>,
 }
@@ -176,6 +176,8 @@ struct StoredRuntimeManifest {
     layers: Vec<RuntimeLayerSpec>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     owned_slots: Vec<StoredOwnedRuntimeSlot>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    owned_files: Vec<StoredOwnedRuntimeFile>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -184,6 +186,14 @@ struct StoredOwnedRuntimeSlot {
     page: u8,
     element: u8,
     event: u8,
+    asset: String,
+    install_order: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct StoredOwnedRuntimeFile {
+    name: String,
+    path: String,
     asset: String,
     install_order: u32,
 }
@@ -328,20 +338,20 @@ impl RuntimeInspectionReport {
                 RuntimeSlotStatus::Match { .. } => None,
                 RuntimeSlotStatus::Missing => Some(format!(
                     "{} at {} is missing or blank",
-                    inspection.slot.name,
-                    inspection.slot.location_display()
+                    inspection.asset.name,
+                    inspection.asset.location_display()
                 )),
                 RuntimeSlotStatus::Drifted { source_target } => Some(format!(
                     "{} at {} drifted on dx={} dy={} with content mismatch",
-                    inspection.slot.name,
-                    inspection.slot.location_display(),
+                    inspection.asset.name,
+                    inspection.asset.location_display(),
                     source_target.dx,
                     source_target.dy,
                 )),
                 RuntimeSlotStatus::WrongTarget { actual_target } => Some(format!(
                     "{} at {} responded from dx={} dy={} instead of the requested target",
-                    inspection.slot.name,
-                    inspection.slot.location_display(),
+                    inspection.asset.name,
+                    inspection.asset.location_display(),
                     actual_target.dx,
                     actual_target.dy
                 )),
@@ -374,8 +384,8 @@ impl RuntimeInspectionReport {
 }
 
 impl RuntimeInstallReport {
-    pub fn installed_slots(&self) -> &[OwnedRuntimeSlot] {
-        &self.installed_slots
+    pub fn installed_assets(&self) -> &[RuntimeOwnedAsset] {
+        &self.installed_assets
     }
 
     pub fn verification_report(&self) -> &RuntimeInspectionReport {
@@ -384,11 +394,11 @@ impl RuntimeInstallReport {
 
     #[cfg(test)]
     pub(crate) fn new_for_tests(
-        installed_slots: Vec<OwnedRuntimeSlot>,
+        installed_assets: Vec<RuntimeOwnedAsset>,
         verification_report: RuntimeInspectionReport,
     ) -> Self {
         Self {
-            installed_slots,
+            installed_assets,
             verification_report,
         }
     }
@@ -401,8 +411,8 @@ impl RuntimeUpgradeReport {
 }
 
 impl RuntimeRemoveReport {
-    pub fn removed_slots(&self) -> &[OwnedRuntimeSlot] {
-        &self.removed_slots
+    pub fn removed_assets(&self) -> &[RuntimeOwnedAsset] {
+        &self.removed_assets
     }
 
     pub fn restored_from_backup(&self) -> bool {
@@ -554,9 +564,14 @@ where
     fn write_owned_slot(&mut self, target: ResolvedTarget, asset: &RuntimeAsset) -> Result<()> {
         self.transport.clear_input()?;
 
+        let slot = asset
+            .owned
+            .slot_location()
+            .expect("config-slot writes require slot-backed assets");
+
         let packet = protocol::encode_config_packet(&ConfigWrite {
             target: target.grid_target(),
-            location: ConfigLocation::new(asset.slot.page, asset.slot.element, asset.slot.event),
+            location: ConfigLocation::new(slot.page, slot.element, slot.event),
             lua: &asset.normalized_content,
             identity: self.next_identity(),
         })?;
@@ -629,18 +644,18 @@ where
     fn read_owned_module_file(
         &mut self,
         target: ResolvedTarget,
-        slot: &OwnedRuntimeSlot,
+        asset: &RuntimeOwnedAsset,
     ) -> Result<Option<RuntimeSlotRead>> {
-        read_owned_slot_module_file(self, target, slot)
+        read_owned_slot_module_file(self, target, asset)
     }
 
     fn read_owned_module_file_with_progress(
         &mut self,
         target: ResolvedTarget,
-        slot: &OwnedRuntimeSlot,
+        asset: &RuntimeOwnedAsset,
         on_step: &mut dyn FnMut(),
     ) -> Result<Option<RuntimeSlotRead>> {
-        read_owned_slot_module_file_with_progress(self, target, slot, on_step)
+        read_owned_slot_module_file_with_progress(self, target, asset, on_step)
     }
 
     fn write_owned_module_file(
@@ -648,7 +663,7 @@ where
         target: ResolvedTarget,
         asset: &RuntimeAsset,
     ) -> Result<()> {
-        write_owned_slot_module_file_atomic(self, target, &asset.slot, &asset.stored_content)
+        write_owned_slot_module_file_atomic(self, target, &asset.owned, &asset.stored_content)
     }
 
     fn write_owned_module_file_with_progress(
@@ -660,7 +675,7 @@ where
         write_owned_slot_module_file_atomic_with_progress(
             self,
             target,
-            &asset.slot,
+            &asset.owned,
             &asset.stored_content,
             on_step,
         )
@@ -669,9 +684,9 @@ where
     fn clear_owned_module_file(
         &mut self,
         target: ResolvedTarget,
-        slot: &OwnedRuntimeSlot,
+        asset: &RuntimeOwnedAsset,
     ) -> Result<()> {
-        clear_owned_slot_module_file(self, target, slot)
+        clear_owned_slot_module_file(self, target, asset)
     }
 }
 
@@ -1140,8 +1155,12 @@ where
     set_runtime_provisioning_phase(progress.as_deref_mut(), "uploading runtime module files");
 
     for asset in bundle.assets() {
-        if !stored_pages.contains(&asset.slot.page) {
-            stored_pages.push(asset.slot.page);
+        if let Some(page) = asset
+            .owned
+            .page()
+            .filter(|page| !stored_pages.contains(page))
+        {
+            stored_pages.push(page);
         }
 
         match provisioning_backend {
@@ -1184,10 +1203,10 @@ where
     }
 
     Ok(RuntimeInstallReport {
-        installed_slots: bundle
+        installed_assets: bundle
             .assets()
             .iter()
-            .map(|asset| asset.slot.clone())
+            .map(|asset| asset.owned.clone())
             .collect(),
         verification_report,
     })
@@ -1204,7 +1223,7 @@ where
     let report = install_runtime_bundle(bundle, requested_target, reader, None)?;
 
     Ok(RuntimeRemoveReport {
-        removed_slots: report.installed_slots().to_vec(),
+        removed_assets: report.installed_assets().to_vec(),
         restored_from_backup: true,
         warning: None,
     })
@@ -1230,10 +1249,14 @@ where
     let mut stored_pages = Vec::new();
 
     for asset in bundle.assets() {
-        if !stored_pages.contains(&asset.slot.page) {
-            stored_pages.push(asset.slot.page);
+        if let Some(page) = asset
+            .owned
+            .page()
+            .filter(|page| !stored_pages.contains(page))
+        {
+            stored_pages.push(page);
         }
-        clear_runtime_slot(provisioning_backend, requested_target, &asset.slot, reader)?;
+        clear_runtime_slot(provisioning_backend, requested_target, &asset.owned, reader)?;
     }
 
     store_runtime_pages(
@@ -1243,20 +1266,20 @@ where
         reader,
     )?;
 
-    let removed_slots = bundle
+    let removed_assets = bundle
         .assets()
         .iter()
-        .map(|asset| asset.slot.clone())
+        .map(|asset| asset.owned.clone())
         .collect::<Vec<_>>();
     verify_removed_slots(
         provisioning_backend,
         requested_target,
-        &removed_slots,
+        &removed_assets,
         reader,
     )?;
 
     Ok(RuntimeRemoveReport {
-        removed_slots,
+        removed_assets,
         restored_from_backup: false,
         warning: Some(warning.to_string()),
     })
@@ -1296,11 +1319,11 @@ where
         let content = read_slot_content_for_backup(
             bundle.manifest().provisioning_backend,
             requested_target,
-            &asset.slot,
+            &asset.owned,
             reader,
             &mut on_step,
         )?;
-        let asset_path = staging_dir.join(&asset.slot.asset);
+        let asset_path = staging_dir.join(&asset.owned.asset);
         fs::write(&asset_path, content).map_err(|error| {
             RuntimeError::host_storage(format!(
                 "failed to write pre-install asset {}: {error}",
@@ -1313,15 +1336,29 @@ where
         provisioning_backend: bundle.manifest().provisioning_backend,
         layers: bundle.manifest().layers.clone(),
         owned_slots: bundle
-            .assets()
+            .manifest()
+            .owned_slots
             .iter()
-            .map(|asset| StoredOwnedRuntimeSlot {
-                name: asset.slot.name.clone(),
-                page: asset.slot.page,
-                element: asset.slot.element,
-                event: asset.slot.event,
-                asset: asset.slot.asset.clone(),
-                install_order: asset.slot.install_order,
+            .cloned()
+            .map(|slot| StoredOwnedRuntimeSlot {
+                name: slot.name,
+                page: slot.page,
+                element: slot.element,
+                event: slot.event,
+                asset: slot.asset,
+                install_order: slot.install_order,
+            })
+            .collect(),
+        owned_files: bundle
+            .manifest()
+            .owned_files
+            .iter()
+            .cloned()
+            .map(|file| StoredOwnedRuntimeFile {
+                name: file.name,
+                path: file.path,
+                asset: file.asset,
+                install_order: file.install_order,
             })
             .collect(),
     };
@@ -1348,7 +1385,7 @@ where
 fn read_slot_content_for_backup<R>(
     provisioning_backend: RuntimeProvisioningBackend,
     requested_target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    asset: &RuntimeOwnedAsset,
     reader: &mut R,
     on_step: &mut dyn FnMut(),
 ) -> Result<String>
@@ -1357,12 +1394,12 @@ where
 {
     let read = match provisioning_backend {
         RuntimeProvisioningBackend::ConfigSlots => {
-            let read = read_runtime_asset(provisioning_backend, requested_target, slot, reader)?;
+            let read = read_runtime_asset(provisioning_backend, requested_target, asset, reader)?;
             on_step();
             read
         }
         RuntimeProvisioningBackend::ModuleFiles => {
-            reader.read_owned_module_file_with_progress(requested_target, slot, on_step)?
+            reader.read_owned_module_file_with_progress(requested_target, asset, on_step)?
         }
     };
 
@@ -1374,8 +1411,8 @@ where
         if read.source_target != expected_target {
             return Err(RuntimeError::verification_failed(format!(
                 "refusing to capture pre-install backup for {} at {} because it responded from dx={} dy={} instead of the requested target",
-                slot.name,
-                slot.location_display(),
+                asset.name,
+                asset.location_display(),
                 read.source_target.dx,
                 read.source_target.dy
             )));
@@ -1475,7 +1512,7 @@ fn staging_dir_for(path: &Path) -> PathBuf {
 fn verify_removed_slots<R>(
     provisioning_backend: RuntimeProvisioningBackend,
     requested_target: ResolvedTarget,
-    removed_slots: &[OwnedRuntimeSlot],
+    removed_assets: &[RuntimeOwnedAsset],
     reader: &mut R,
 ) -> Result<()>
 where
@@ -1484,16 +1521,16 @@ where
     let cleared_slot_sha256 =
         normalized_sha256(&expected_runtime_readback(provisioning_backend, ""));
 
-    for slot in removed_slots {
+    for asset in removed_assets {
         if let Some(read) =
-            read_runtime_asset(provisioning_backend, requested_target, slot, reader)?
+            read_runtime_asset(provisioning_backend, requested_target, asset, reader)?
         {
             if let ResolvedTarget::Explicit(expected_target) = requested_target {
                 if read.source_target != expected_target {
                     return Err(RuntimeError::verification_failed(format!(
                         "post-remove owned slot {} at {} responded from dx={} dy={} instead of the requested target",
-                        slot.name,
-                        slot.location_display(),
+                        asset.name,
+                        asset.location_display(),
                         read.source_target.dx,
                         read.source_target.dy
                     )));
@@ -1510,8 +1547,8 @@ where
 
             return Err(RuntimeError::verification_failed(format!(
                 "post-remove owned slot {} at {} still contains content on dx={} dy={}",
-                slot.name,
-                slot.location_display(),
+                asset.name,
+                asset.location_display(),
                 read.source_target.dx,
                 read.source_target.dy
             )));
@@ -1553,7 +1590,7 @@ where
                 let read = read_runtime_asset(
                     provisioning_backend,
                     requested_target,
-                    &asset.slot,
+                    &asset.owned,
                     reader,
                 )?;
                 advance_runtime_provisioning_progress(
@@ -1576,7 +1613,7 @@ where
                 };
                 reader.read_owned_module_file_with_progress(
                     requested_target,
-                    &asset.slot,
+                    &asset.owned,
                     &mut on_step,
                 )?
             }
@@ -1613,7 +1650,7 @@ where
         };
 
         slot_inspections.push(RuntimeSlotInspection {
-            slot: asset.slot.clone(),
+            asset: asset.owned.clone(),
             status,
         });
     }
@@ -1628,16 +1665,21 @@ where
 fn read_runtime_asset<R>(
     provisioning_backend: RuntimeProvisioningBackend,
     requested_target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    asset: &RuntimeOwnedAsset,
     reader: &mut R,
 ) -> Result<Option<RuntimeSlotRead>>
 where
     R: RuntimeSlotReader + RuntimeModuleFileAccessor,
 {
     match provisioning_backend {
-        RuntimeProvisioningBackend::ConfigSlots => reader.read_owned_slot(requested_target, slot),
+        RuntimeProvisioningBackend::ConfigSlots => reader.read_owned_slot(
+            requested_target,
+            asset
+                .slot_location()
+                .expect("config-slot reads require slot-backed assets"),
+        ),
         RuntimeProvisioningBackend::ModuleFiles => {
-            reader.read_owned_module_file(requested_target, slot)
+            reader.read_owned_module_file(requested_target, asset)
         }
     }
 }
@@ -1662,16 +1704,21 @@ where
 fn clear_runtime_slot<R>(
     provisioning_backend: RuntimeProvisioningBackend,
     requested_target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    asset: &RuntimeOwnedAsset,
     reader: &mut R,
 ) -> Result<()>
 where
     R: RuntimeSlotClearer + RuntimeModuleFileAccessor,
 {
     match provisioning_backend {
-        RuntimeProvisioningBackend::ConfigSlots => reader.clear_owned_slot(requested_target, slot),
+        RuntimeProvisioningBackend::ConfigSlots => reader.clear_owned_slot(
+            requested_target,
+            asset
+                .slot_location()
+                .expect("config-slot clears require slot-backed assets"),
+        ),
         RuntimeProvisioningBackend::ModuleFiles => {
-            reader.clear_owned_module_file(requested_target, slot)
+            reader.clear_owned_module_file(requested_target, asset)
         }
     }
 }
@@ -2317,9 +2364,9 @@ mod tests {
         fn read_owned_module_file(
             &mut self,
             _target: ResolvedTarget,
-            slot: &OwnedRuntimeSlot,
+            asset: &RuntimeOwnedAsset,
         ) -> Result<Option<RuntimeSlotRead>> {
-            Ok(self.slots.get(&slot.name).cloned())
+            Ok(self.slots.get(&asset.name).cloned())
         }
 
         fn write_owned_module_file(
@@ -2335,7 +2382,7 @@ mod tests {
         fn clear_owned_module_file(
             &mut self,
             _target: ResolvedTarget,
-            _slot: &OwnedRuntimeSlot,
+            _asset: &RuntimeOwnedAsset,
         ) -> Result<()> {
             Err(RuntimeError::unexpected_response(
                 "static test reader does not support module-file clears",
@@ -2386,24 +2433,24 @@ mod tests {
 
     impl RuntimeSlotWriter for RecordingSlotAccessor {
         fn write_owned_slot(&mut self, target: ResolvedTarget, asset: &RuntimeAsset) -> Result<()> {
-            self.writes.push(asset.slot.name.clone());
+            self.writes.push(asset.owned.name.clone());
 
             if self.persist_writes {
                 let source_target = match target {
                     ResolvedTarget::Broadcast => GridTarget::new(0, 0),
                     ResolvedTarget::Explicit(target) => target,
                 };
-                let content = if self.drifted_slot.as_deref() == Some(asset.slot.name.as_str()) {
+                let content = if self.drifted_slot.as_deref() == Some(asset.owned.name.as_str()) {
                     expected_config_slot_readback(&format!(
                         "{}\n-- drifted after install\n",
-                        asset.slot.name
+                        asset.owned.name
                     ))
                 } else {
                     expected_config_slot_readback(&asset.normalized_content)
                 };
 
                 self.slots.insert(
-                    asset.slot.name.clone(),
+                    asset.owned.name.clone(),
                     RuntimeSlotRead {
                         source_target,
                         content,
@@ -2456,9 +2503,9 @@ mod tests {
         fn read_owned_module_file(
             &mut self,
             _target: ResolvedTarget,
-            slot: &OwnedRuntimeSlot,
+            asset: &RuntimeOwnedAsset,
         ) -> Result<Option<RuntimeSlotRead>> {
-            Ok(self.module_files.get(&slot.name).cloned())
+            Ok(self.module_files.get(&asset.name).cloned())
         }
 
         fn write_owned_module_file(
@@ -2466,24 +2513,24 @@ mod tests {
             target: ResolvedTarget,
             asset: &RuntimeAsset,
         ) -> Result<()> {
-            self.writes.push(asset.slot.name.clone());
+            self.writes.push(asset.owned.name.clone());
 
             if self.persist_writes {
                 let source_target = match target {
                     ResolvedTarget::Broadcast => GridTarget::new(0, 0),
                     ResolvedTarget::Explicit(target) => target,
                 };
-                let content = if self.drifted_slot.as_deref() == Some(asset.slot.name.as_str()) {
+                let content = if self.drifted_slot.as_deref() == Some(asset.owned.name.as_str()) {
                     normalize_text_content(&format!(
                         "{}\n-- drifted after install\n",
-                        asset.slot.name
+                        asset.owned.name
                     ))
                 } else {
                     asset.stored_content.clone()
                 };
 
                 self.module_files.insert(
-                    asset.slot.name.clone(),
+                    asset.owned.name.clone(),
                     RuntimeSlotRead {
                         source_target,
                         content,
@@ -2497,10 +2544,10 @@ mod tests {
         fn clear_owned_module_file(
             &mut self,
             _target: ResolvedTarget,
-            slot: &OwnedRuntimeSlot,
+            asset: &RuntimeOwnedAsset,
         ) -> Result<()> {
-            self.clears.push(slot.name.clone());
-            self.module_files.remove(&slot.name);
+            self.clears.push(asset.name.clone());
+            self.module_files.remove(&asset.name);
             Ok(())
         }
     }
@@ -2585,7 +2632,7 @@ install_order = 20
 
         for asset in bundle.assets() {
             reader.insert(
-                &asset.slot,
+                asset.owned.slot_location().unwrap(),
                 GridTarget::new(0, 0),
                 expected_config_slot_readback(&asset.normalized_content),
             );
@@ -2610,13 +2657,17 @@ install_order = 20
         let mut reader = StaticSlotReader::default();
 
         for asset in bundle.assets() {
-            let content = if asset.slot.name == "lcd-draw" {
+            let content = if asset.owned.name == "lcd-draw" {
                 expected_config_slot_readback("return 'drifted'\n")
             } else {
                 expected_config_slot_readback(&asset.normalized_content)
             };
 
-            reader.insert(&asset.slot, GridTarget::new(0, 0), content);
+            reader.insert(
+                asset.owned.slot_location().unwrap(),
+                GridTarget::new(0, 0),
+                content,
+            );
         }
 
         let error = verify_runtime_with_bundle_dir(
@@ -2667,7 +2718,7 @@ install_order = 20
 
         for asset in bundle.assets() {
             reader.insert(
-                &asset.slot,
+                asset.owned.slot_location().unwrap(),
                 GridTarget::new(0, 0),
                 expected_config_slot_readback(&asset.normalized_content),
             );
@@ -2691,7 +2742,7 @@ install_order = 20
 
         let init_asset = &bundle.assets()[0];
         reader.insert(
-            &init_asset.slot,
+            init_asset.owned.slot_location().unwrap(),
             GridTarget::new(0, 0),
             expected_config_slot_readback(&init_asset.normalized_content),
         );
@@ -2704,7 +2755,7 @@ install_order = 20
         assert!(report
             .slot_inspections()
             .iter()
-            .any(|inspection| inspection.slot.name == "lcd-draw"
+            .any(|inspection| inspection.asset.name == "lcd-draw"
                 && matches!(inspection.status, RuntimeSlotStatus::Missing)));
     }
 
@@ -2729,7 +2780,7 @@ owned_slots = []
 
         assert_eq!(
             error.to_string(),
-            "invalid runtime manifest: owned_slots must not be empty"
+            "invalid runtime manifest: owned_slots and owned_files must not both be empty"
         );
     }
 
@@ -2802,7 +2853,7 @@ install_order = 10
         assert_eq!(accessor.stored_pages(), &[0]);
         assert_eq!(
             report
-                .installed_slots()
+                .installed_assets()
                 .iter()
                 .map(|slot| slot.name.as_str())
                 .collect::<Vec<_>>(),
@@ -2816,12 +2867,12 @@ install_order = 10
 
         let backup_bundle = read_backup_bundle(&config_root);
         assert_eq!(backup_bundle.assets().len(), 2);
-        assert_eq!(backup_bundle.assets()[0].slot.name, "first");
+        assert_eq!(backup_bundle.assets()[0].owned.name, "first");
         assert_eq!(
             backup_bundle.assets()[0].stored_content,
             expected_config_slot_readback("return 'pre-first'\n")
         );
-        assert_eq!(backup_bundle.assets()[1].slot.name, "second");
+        assert_eq!(backup_bundle.assets()[1].owned.name, "second");
         assert_eq!(backup_bundle.assets()[1].normalized_content, "");
     }
 
@@ -2893,7 +2944,7 @@ install_order = 10
 
         for asset in older_bundle.assets() {
             accessor.slots.insert(
-                asset.slot.name.clone(),
+                asset.owned.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
                     content: expected_config_slot_readback(&asset.normalized_content),
@@ -2922,7 +2973,7 @@ install_order = 10
             &current_bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.name.clone())
+                .map(|asset| asset.owned.name.clone())
                 .collect::<Vec<_>>()
         );
         assert_eq!(accessor.stored_pages(), &[0]);
@@ -2991,7 +3042,7 @@ install_order = 10
             bundle
                 .assets()
                 .iter()
-                .find(|asset| asset.slot.name == "lcd-draw")
+                .find(|asset| asset.owned.name == "lcd-draw")
                 .unwrap()
                 .stored_content
         );
@@ -3034,7 +3085,7 @@ install_order = 10
 
         for asset in older_bundle.assets() {
             accessor.module_files.insert(
-                asset.slot.name.clone(),
+                asset.owned.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
                     content: asset.stored_content.clone(),
@@ -3069,7 +3120,7 @@ install_order = 10
             current_bundle
                 .assets()
                 .iter()
-                .find(|asset| asset.slot.name == "lcd-draw")
+                .find(|asset| asset.owned.name == "lcd-draw")
                 .unwrap()
                 .stored_content
         );
@@ -3089,7 +3140,7 @@ install_order = 10
 
         for asset in bundle.assets() {
             reader.insert(
-                &asset.slot,
+                asset.owned.slot_location().unwrap(),
                 GridTarget::new(0, 0),
                 asset.stored_content.clone(),
             );
@@ -3119,13 +3170,17 @@ install_order = 10
         let mut reader = StaticSlotReader::default();
 
         for asset in bundle.assets() {
-            let content = if asset.slot.name == "lcd-draw" {
+            let content = if asset.owned.name == "lcd-draw" {
                 "return 'drifted file content'\n".to_string()
             } else {
                 asset.stored_content.clone()
             };
 
-            reader.insert(&asset.slot, GridTarget::new(0, 0), content);
+            reader.insert(
+                asset.owned.slot_location().unwrap(),
+                GridTarget::new(0, 0),
+                content,
+            );
         }
 
         let error = verify_runtime_with_bundle_dir(
@@ -3155,10 +3210,10 @@ install_order = 10
         let init_asset = bundle
             .assets()
             .iter()
-            .find(|asset| asset.slot.name == "lcd-init")
+            .find(|asset| asset.owned.name == "lcd-init")
             .unwrap();
         reader.insert(
-            &init_asset.slot,
+            init_asset.owned.slot_location().unwrap(),
             GridTarget::new(0, 0),
             init_asset.stored_content.clone(),
         );
@@ -3174,7 +3229,7 @@ install_order = 10
         assert!(report
             .slot_inspections()
             .iter()
-            .any(|inspection| inspection.slot.name == "lcd-draw"
+            .any(|inspection| inspection.asset.name == "lcd-draw"
                 && matches!(inspection.status, RuntimeSlotStatus::Missing)));
     }
 
@@ -3213,7 +3268,7 @@ install_order = 10
             &bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.name.clone())
+                .map(|asset| asset.owned.name.clone())
                 .collect::<Vec<_>>()
         );
         assert!(accessor.stored_pages().is_empty());
@@ -3224,7 +3279,7 @@ install_order = 10
             bundle
                 .assets()
                 .iter()
-                .find(|asset| asset.slot.name == "lcd-draw")
+                .find(|asset| asset.owned.name == "lcd-draw")
                 .unwrap()
                 .stored_content
         );
@@ -3245,7 +3300,7 @@ install_order = 10
         };
 
         for asset in bundle.assets() {
-            let content = if asset.slot.name == "lcd-init" {
+            let content = if asset.owned.name == "lcd-init" {
                 expected_config_slot_readback("return 'drifted'\n")
             } else {
                 String::new()
@@ -3253,7 +3308,7 @@ install_order = 10
 
             if !content.is_empty() {
                 accessor.slots.insert(
-                    asset.slot.name.clone(),
+                    asset.owned.name.clone(),
                     RuntimeSlotRead {
                         source_target: GridTarget::new(0, 0),
                         content,
@@ -3274,7 +3329,7 @@ install_order = 10
             &bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.name.clone())
+                .map(|asset| asset.owned.name.clone())
                 .collect::<Vec<_>>()
         );
         assert_eq!(accessor.stored_pages(), &[0]);
@@ -3354,7 +3409,7 @@ install_order = 10
 
         for asset in bundle.assets() {
             accessor.slots.insert(
-                asset.slot.name.clone(),
+                asset.owned.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
                     content: expected_config_slot_readback(&asset.normalized_content),
@@ -3374,12 +3429,12 @@ install_order = 10
             &bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.name.clone())
+                .map(|asset| asset.owned.name.clone())
                 .collect::<Vec<_>>()
         );
         assert!(accessor.clear_order().is_empty());
         assert_eq!(accessor.stored_pages(), &[0]);
-        assert_eq!(report.removed_slots().len(), bundle.assets().len());
+        assert_eq!(report.removed_assets().len(), bundle.assets().len());
         assert!(report.restored_from_backup());
         assert_eq!(report.warning(), None);
         assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
@@ -3401,7 +3456,7 @@ install_order = 10
 
         for asset in bundle.assets() {
             accessor.slots.insert(
-                asset.slot.name.clone(),
+                asset.owned.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
                     content: expected_config_slot_readback(&asset.normalized_content),
@@ -3426,7 +3481,7 @@ install_order = 10
             &bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.name.clone())
+                .map(|asset| asset.owned.name.clone())
                 .collect::<Vec<_>>()
         );
         assert_eq!(accessor.stored_pages(), &[0]);
@@ -3463,7 +3518,7 @@ install_order = 10
 
         for asset in bundle.assets() {
             accessor.module_files.insert(
-                asset.slot.name.clone(),
+                asset.owned.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
                     content: asset.stored_content.clone(),
@@ -3483,13 +3538,13 @@ install_order = 10
             &backup_bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.name.clone())
+                .map(|asset| asset.owned.name.clone())
                 .collect::<Vec<_>>()
         );
         assert!(accessor.clear_order().is_empty());
         assert!(accessor.stored_pages().is_empty());
         assert_eq!(accessor.discarded_pages(), 1);
-        assert_eq!(report.removed_slots().len(), bundle.assets().len());
+        assert_eq!(report.removed_assets().len(), bundle.assets().len());
         assert!(report.restored_from_backup());
         assert_eq!(report.warning(), None);
         assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
@@ -3498,7 +3553,7 @@ install_order = 10
             backup_bundle
                 .assets()
                 .iter()
-                .find(|asset| asset.slot.name == "lcd-draw")
+                .find(|asset| asset.owned.name == "lcd-draw")
                 .unwrap()
                 .stored_content
         );
@@ -3518,7 +3573,7 @@ install_order = 10
 
         for asset in bundle.assets() {
             accessor.module_files.insert(
-                asset.slot.name.clone(),
+                asset.owned.name.clone(),
                 RuntimeSlotRead {
                     source_target: GridTarget::new(0, 0),
                     content: asset.stored_content.clone(),
@@ -3543,7 +3598,7 @@ install_order = 10
             &bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.name.clone())
+                .map(|asset| asset.owned.name.clone())
                 .collect::<Vec<_>>()
         );
         assert!(accessor.write_order().is_empty());

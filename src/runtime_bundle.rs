@@ -57,7 +57,10 @@ pub struct RuntimeBundleManifest {
     #[serde(default)]
     pub provisioning_backend: RuntimeProvisioningBackend,
     pub layers: Vec<RuntimeLayerSpec>,
+    #[serde(default)]
     pub owned_slots: Vec<OwnedRuntimeSlot>,
+    #[serde(default)]
+    pub owned_files: Vec<OwnedRuntimeFile>,
     #[serde(default)]
     pub fields: Vec<RuntimeFieldSpec>,
 }
@@ -98,6 +101,28 @@ pub struct OwnedRuntimeSlot {
     pub install_order: u32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OwnedRuntimeFile {
+    pub name: String,
+    pub path: String,
+    pub asset: String,
+    pub install_order: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeOwnedAssetLocation {
+    Slot(OwnedRuntimeSlot),
+    File(OwnedRuntimeFile),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeOwnedAsset {
+    pub name: String,
+    pub asset: String,
+    pub install_order: u32,
+    pub location: RuntimeOwnedAssetLocation,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeFieldSpec {
     pub name: String,
@@ -110,7 +135,7 @@ pub struct RuntimeFieldSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAsset {
-    pub slot: OwnedRuntimeSlot,
+    pub owned: RuntimeOwnedAsset,
     pub source_path: PathBuf,
     pub original_content: String,
     pub normalized_content: String,
@@ -208,13 +233,32 @@ impl RuntimeBundle {
 
         validate_manifest(&manifest)?;
 
-        let mut assets = manifest
-            .owned_slots
-            .iter()
-            .cloned()
-            .map(|slot| load_runtime_asset(&root, manifest.provisioning_backend, slot))
-            .collect::<Result<Vec<_>>>()?;
-        assets.sort_by_key(|asset| asset.slot.install_order);
+        let mut assets = Vec::new();
+        for slot in manifest.owned_slots.iter().cloned() {
+            assets.push(load_runtime_asset(
+                &root,
+                manifest.provisioning_backend,
+                RuntimeOwnedAsset {
+                    name: slot.name.clone(),
+                    asset: slot.asset.clone(),
+                    install_order: slot.install_order,
+                    location: RuntimeOwnedAssetLocation::Slot(slot),
+                },
+            )?);
+        }
+        for file in manifest.owned_files.iter().cloned() {
+            assets.push(load_runtime_asset(
+                &root,
+                manifest.provisioning_backend,
+                RuntimeOwnedAsset {
+                    name: file.name.clone(),
+                    asset: file.asset.clone(),
+                    install_order: file.install_order,
+                    location: RuntimeOwnedAssetLocation::File(file),
+                },
+            )?);
+        }
+        assets.sort_by_key(|asset| asset.owned.install_order);
 
         Ok(Self {
             root,
@@ -249,6 +293,39 @@ impl OwnedRuntimeSlot {
             "/{:02x}/{:02x}/{:02x}.cfg",
             self.page, self.element, self.event
         )
+    }
+}
+
+impl OwnedRuntimeFile {
+    pub fn location_display(&self) -> String {
+        self.path.clone()
+    }
+}
+
+impl RuntimeOwnedAsset {
+    pub fn location_display(&self) -> String {
+        match &self.location {
+            RuntimeOwnedAssetLocation::Slot(slot) => slot.location_display(),
+            RuntimeOwnedAssetLocation::File(file) => file.location_display(),
+        }
+    }
+
+    pub fn module_file_path(&self) -> Option<String> {
+        match &self.location {
+            RuntimeOwnedAssetLocation::Slot(slot) => Some(slot.derived_module_file_path()),
+            RuntimeOwnedAssetLocation::File(file) => Some(file.path.clone()),
+        }
+    }
+
+    pub fn slot_location(&self) -> Option<&OwnedRuntimeSlot> {
+        match &self.location {
+            RuntimeOwnedAssetLocation::Slot(slot) => Some(slot),
+            RuntimeOwnedAssetLocation::File(_) => None,
+        }
+    }
+
+    pub fn page(&self) -> Option<u8> {
+        self.slot_location().map(|slot| slot.page)
     }
 }
 
@@ -397,16 +474,16 @@ pub fn normalized_sha256(content: &str) -> String {
 fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
     validate_layers(manifest)?;
 
-    if manifest.owned_slots.is_empty() {
+    if manifest.owned_slots.is_empty() && manifest.owned_files.is_empty() {
         return Err(RuntimeBundleError::InvalidManifest {
-            message: "owned_slots must not be empty".to_string(),
+            message: "owned_slots and owned_files must not both be empty".to_string(),
         });
     }
 
-    let mut slot_names = HashSet::new();
+    let mut asset_names = HashSet::new();
     let mut slot_locations = HashSet::new();
     for slot in &manifest.owned_slots {
-        if !slot_names.insert(slot.name.clone()) {
+        if !asset_names.insert(slot.name.clone()) {
             return Err(RuntimeBundleError::InvalidManifest {
                 message: format!("duplicate owned slot name {}", slot.name),
             });
@@ -433,6 +510,35 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
         }
     }
 
+    if manifest.provisioning_backend == RuntimeProvisioningBackend::ConfigSlots
+        && !manifest.owned_files.is_empty()
+    {
+        let file = &manifest.owned_files[0];
+        return Err(RuntimeBundleError::InvalidManifest {
+            message: format!(
+                "owned_files is only supported for module-files provisioning; file {} targets {}",
+                file.name, file.path
+            ),
+        });
+    }
+
+    let mut file_paths = HashSet::new();
+    for file in &manifest.owned_files {
+        if !asset_names.insert(file.name.clone()) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!("duplicate owned file name {}", file.name),
+            });
+        }
+
+        validate_owned_runtime_file(file)?;
+
+        if !file_paths.insert(file.path.clone()) {
+            return Err(RuntimeBundleError::InvalidManifest {
+                message: format!("duplicate owned file path {}", file.path),
+            });
+        }
+    }
+
     let declared_layers = manifest
         .layers
         .iter()
@@ -454,6 +560,44 @@ fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {
                 ),
             });
         }
+    }
+
+    Ok(())
+}
+
+fn validate_owned_runtime_file(file: &OwnedRuntimeFile) -> Result<()> {
+    let path = &file.path;
+    let device_path = Path::new(path);
+
+    if path.trim().is_empty()
+        || !device_path.is_absolute()
+        || device_path == Path::new("/")
+        || device_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::CurDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(RuntimeBundleError::InvalidManifest {
+            message: format!(
+                "owned file path for {} must be an absolute module file path without traversal; got {}",
+                file.name, path
+            ),
+        });
+    }
+
+    if !device_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
+    {
+        return Err(RuntimeBundleError::InvalidManifest {
+            message: format!(
+                "owned file path for {} must point to a .lua helper file; got {}",
+                file.name, path
+            ),
+        });
     }
 
     Ok(())
@@ -517,21 +661,25 @@ fn validate_layers(manifest: &RuntimeBundleManifest) -> Result<()> {
 fn load_runtime_asset(
     root: &Path,
     provisioning_backend: RuntimeProvisioningBackend,
-    slot: OwnedRuntimeSlot,
+    owned: RuntimeOwnedAsset,
 ) -> Result<RuntimeAsset> {
-    let source_path = resolve_asset_path(root, &slot.asset)?;
+    let source_path = resolve_asset_path(root, &owned.asset)?;
     let original_content =
         fs::read_to_string(&source_path).map_err(|error| RuntimeBundleError::ReadAsset {
             path: source_path.clone(),
             message: error.to_string(),
         })?;
-    let normalized_content = normalize_runtime_script_content(&original_content);
-    validate_installable_script_length(&slot, &normalized_content)?;
-    let stored_content = stored_runtime_script_content(provisioning_backend, &normalized_content);
+    let normalized_content =
+        normalize_runtime_script_content(provisioning_backend, &owned, &original_content);
+    if provisioning_backend == RuntimeProvisioningBackend::ConfigSlots {
+        validate_installable_script_length(&owned, &normalized_content)?;
+    }
+    let stored_content =
+        stored_runtime_script_content(provisioning_backend, &owned, &normalized_content);
     let actual_hash = sha256_hex(stored_content.as_bytes());
 
     Ok(RuntimeAsset {
-        slot,
+        owned,
         source_path,
         original_content,
         normalized_content,
@@ -540,31 +688,44 @@ fn load_runtime_asset(
     })
 }
 
-fn normalize_runtime_script_content(content: &str) -> String {
+fn normalize_runtime_script_content(
+    provisioning_backend: RuntimeProvisioningBackend,
+    owned: &RuntimeOwnedAsset,
+    content: &str,
+) -> String {
     let normalized = normalize_text_content(content);
 
-    if normalized.is_empty() {
-        String::new()
-    } else {
-        frame_immediate_lua(&normalized)
+    match (provisioning_backend, &owned.location) {
+        (_, RuntimeOwnedAssetLocation::File(_)) => normalized,
+        (_, RuntimeOwnedAssetLocation::Slot(_)) => {
+            if normalized.is_empty() {
+                String::new()
+            } else {
+                frame_immediate_lua(&normalized)
+            }
+        }
     }
 }
 
 fn stored_runtime_script_content(
     provisioning_backend: RuntimeProvisioningBackend,
+    owned: &RuntimeOwnedAsset,
     normalized_content: &str,
 ) -> String {
     match provisioning_backend {
         RuntimeProvisioningBackend::ConfigSlots => {
             normalize_text_content(&frame_immediate_lua(normalized_content))
         }
-        RuntimeProvisioningBackend::ModuleFiles => {
-            if normalized_content.is_empty() {
-                String::new()
-            } else {
-                frame_lua(&compact_module_file_lua_body(normalized_content))
+        RuntimeProvisioningBackend::ModuleFiles => match &owned.location {
+            RuntimeOwnedAssetLocation::Slot(_) => {
+                if normalized_content.is_empty() {
+                    String::new()
+                } else {
+                    frame_lua(&compact_module_file_lua_body(normalized_content))
+                }
             }
-        }
+            RuntimeOwnedAssetLocation::File(_) => normalized_content.to_string(),
+        },
     }
 }
 
@@ -592,7 +753,7 @@ fn resolve_asset_path(root: &Path, asset: &str) -> Result<PathBuf> {
     Ok(root.join(asset_path))
 }
 
-fn validate_installable_script_length(slot: &OwnedRuntimeSlot, content: &str) -> Result<()> {
+fn validate_installable_script_length(owned: &RuntimeOwnedAsset, content: &str) -> Result<()> {
     let framed_len = frame_immediate_lua(content).len();
     let max_len = GRID_MAX_LUA_BYTES - 1;
 
@@ -600,7 +761,7 @@ fn validate_installable_script_length(slot: &OwnedRuntimeSlot, content: &str) ->
         return Err(RuntimeBundleError::InvalidManifest {
             message: format!(
                 "owned slot {} exceeds the Grid CONFIG payload limit after Lua framing: {} bytes (maximum {})",
-                slot.name, framed_len, max_len
+                owned.name, framed_len, max_len
             ),
         });
     }
@@ -663,8 +824,8 @@ install_order = 10
             RuntimeProvisioningBackend::ConfigSlots
         );
         assert_eq!(bundle.assets().len(), 2);
-        assert_eq!(bundle.assets()[0].slot.name, "lcd-init");
-        assert_eq!(bundle.assets()[1].slot.name, "lcd-draw");
+        assert_eq!(bundle.assets()[0].owned.name, "lcd-init");
+        assert_eq!(bundle.assets()[1].owned.name, "lcd-draw");
         assert!(bundle
             .manifest()
             .fields
@@ -687,12 +848,12 @@ install_order = 10
         let init = bundle
             .assets()
             .iter()
-            .find(|asset| asset.slot.name == "lcd-init")
+            .find(|asset| asset.owned.name == "lcd-init")
             .unwrap();
         let draw = bundle
             .assets()
             .iter()
-            .find(|asset| asset.slot.name == "lcd-draw")
+            .find(|asset| asset.owned.name == "lcd-draw")
             .unwrap();
 
         assert!(init.normalized_content.contains("function set_field("));
@@ -740,14 +901,14 @@ install_order = 10
             bundle.manifest().provisioning_backend,
             RuntimeProvisioningBackend::ModuleFiles
         );
-        assert_eq!(bundle.assets().len(), 2);
+        assert_eq!(bundle.assets().len(), 3);
         assert_eq!(
             bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.derived_module_file_path())
+                .map(|asset| asset.owned.module_file_path().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["/00/0d/00.cfg", "/00/0d/08.cfg"]
+            vec!["/vsn1_media_runtime.lua", "/00/0d/00.cfg", "/00/0d/08.cfg",]
         );
         assert_eq!(
             bundle
@@ -777,10 +938,85 @@ install_order = 10
             .any(|field| field.name == "playback_status.status"));
 
         for asset in bundle.assets() {
-            assert!(frame_immediate_lua(&asset.normalized_content).len() <= GRID_MAX_LUA_BYTES - 1);
-            assert!(asset.stored_content.starts_with("<?lua --[[@cb]]"));
-            assert!(!asset.stored_content.contains('\n'));
+            match asset.owned.name.as_str() {
+                "lcd-init" | "lcd-draw" => {
+                    assert!(asset.stored_content.starts_with("<?lua --[[@cb]]"));
+                    assert!(!asset.stored_content.contains('\n'));
+                }
+                "media-runtime-module" => {
+                    assert!(!asset.stored_content.starts_with("<?lua "));
+                    assert!(asset.stored_content.contains('\n'));
+                }
+                other => panic!("unexpected media asset {other}"),
+            }
         }
+
+        let init = bundle
+            .assets()
+            .iter()
+            .find(|asset| asset.owned.name == "lcd-init")
+            .unwrap();
+        assert!(init.normalized_content.contains("runtime.init()"));
+        assert!(init
+            .normalized_content
+            .contains("set_field=runtime.set_field"));
+        assert!(init
+            .normalized_content
+            .contains("activate_layer=runtime.activate_layer"));
+
+        let runtime = bundle
+            .assets()
+            .iter()
+            .find(|asset| asset.owned.name == "media-runtime-module")
+            .unwrap();
+        assert!(runtime
+            .normalized_content
+            .contains("function Module.set_field("));
+        assert!(runtime
+            .normalized_content
+            .contains("function Module.activate_layer("));
+        assert!(runtime
+            .normalized_content
+            .contains("function Module.draw(self)"));
+    }
+
+    #[test]
+    fn rejects_owned_files_for_config_slot_provisioning() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        fs::write(root.join("lcd-init.lua"), "return 1\n").unwrap();
+        fs::write(root.join("helper.lua"), "return 1\n").unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[owned_slots]]
+name = "lcd-init"
+page = 0
+element = 13
+event = 0
+asset = "lcd-init.lua"
+install_order = 10
+
+[[owned_files]]
+name = "helper"
+path = "/helper.lua"
+asset = "helper.lua"
+install_order = 20
+"#,
+        )
+        .unwrap();
+
+        let error = RuntimeBundle::load_from_dir(root).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid runtime manifest: owned_files is only supported for module-files provisioning; file helper targets /helper.lua"
+        );
     }
 
     #[test]
@@ -922,7 +1158,7 @@ normalized_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             bundle
                 .assets()
                 .iter()
-                .map(|asset| asset.slot.derived_module_file_path())
+                .map(|asset| asset.owned.module_file_path().unwrap())
                 .collect::<Vec<_>>(),
             vec!["/00/0d/00.cfg", "/00/0d/08.cfg"]
         );
@@ -965,12 +1201,12 @@ normalized_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
             file_manager_bundle
                 .assets()
                 .iter()
-                .map(|asset| (asset.slot.name.as_str(), asset.normalized_content.as_str()))
+                .map(|asset| (asset.owned.name.as_str(), asset.normalized_content.as_str()))
                 .collect::<Vec<_>>(),
             default_bundle
                 .assets()
                 .iter()
-                .map(|asset| (asset.slot.name.as_str(), asset.normalized_content.as_str()))
+                .map(|asset| (asset.owned.name.as_str(), asset.normalized_content.as_str()))
                 .collect::<Vec<_>>()
         );
         assert!(default_bundle
@@ -1389,6 +1625,44 @@ install_order = 10
         assert_eq!(
             error.to_string(),
             "invalid runtime manifest: owned slot lcd-init exceeds the Grid CONFIG payload limit after Lua framing: 919 bytes (maximum 908)"
+        );
+    }
+
+    #[test]
+    fn module_files_backend_allows_scripts_that_exceed_the_grid_config_limit() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path();
+        let oversized = format!("return '{}\n'", "a".repeat(1200));
+        fs::write(root.join("helper.lua"), &oversized).unwrap();
+        fs::write(
+            root.join("manifest.toml"),
+            r#"
+provisioning_backend = "module-files"
+
+[[layers]]
+name = "persistent"
+priority = 0
+activation = "persistent"
+
+[[owned_files]]
+name = "helper"
+path = "/helper.lua"
+asset = "helper.lua"
+install_order = 10
+"#,
+        )
+        .unwrap();
+
+        let bundle = RuntimeBundle::load_from_dir(root).unwrap();
+
+        assert_eq!(bundle.assets().len(), 1);
+        assert_eq!(
+            bundle.assets()[0].owned.module_file_path().unwrap(),
+            "/helper.lua"
+        );
+        assert_eq!(
+            bundle.assets()[0].stored_content,
+            normalize_text_content(&oversized)
         );
     }
 }

@@ -1185,8 +1185,8 @@ fn render_runtime_output(
 
         output.push_str(&format!(
             "- {} ({}): {}\n",
-            inspection.slot.name,
-            inspection.slot.location_display(),
+            inspection.asset.name,
+            inspection.asset.location_display(),
             detail
         ));
     }
@@ -1233,9 +1233,13 @@ fn render_runtime_install_output(
         ));
     }
 
-    output.push_str("Installed owned slots in manifest order:\n");
-    for slot in report.installed_slots() {
-        output.push_str(&format!("- {} ({})\n", slot.name, slot.location_display()));
+    output.push_str("Installed owned assets in manifest order:\n");
+    for asset in report.installed_assets() {
+        output.push_str(&format!(
+            "- {} ({})\n",
+            asset.name,
+            asset.location_display()
+        ));
     }
 
     output
@@ -1263,7 +1267,7 @@ fn render_runtime_repair_output(
     report: &RuntimeInstallReport,
 ) -> String {
     let mut output = render_runtime_install_output(device, requested_target, None, report);
-    output.push_str("Repair: reapplied the frozen installed runtime to the owned slots.\n");
+    output.push_str("Repair: reapplied the frozen installed runtime to the owned assets.\n");
     output
 }
 
@@ -1286,9 +1290,13 @@ fn render_runtime_remove_output(
         output.push_str(&format!("Warning: {warning}\n"));
     }
 
-    output.push_str("Affected owned slots in manifest order:\n");
-    for slot in report.removed_slots() {
-        output.push_str(&format!("- {} ({})\n", slot.name, slot.location_display()));
+    output.push_str("Affected owned assets in manifest order:\n");
+    for asset in report.removed_assets() {
+        output.push_str(&format!(
+            "- {} ({})\n",
+            asset.name,
+            asset.location_display()
+        ));
     }
 
     output
@@ -2710,36 +2718,50 @@ mod tests {
     }
 
     #[test]
-    fn runtime_install_rendering_includes_verification_summary_and_installed_slots() {
+    fn runtime_install_rendering_includes_verification_summary_and_installed_assets() {
         let source_target = protocol::GridTarget::new(0, 0);
-        let installed_slots = vec![
-            crate::runtime_bundle::OwnedRuntimeSlot {
+        let installed_assets = vec![
+            crate::runtime_bundle::RuntimeOwnedAsset {
                 name: "lcd-init".to_string(),
-                page: 0,
-                element: 13,
-                event: 0,
                 asset: "lcd-init.lua".to_string(),
                 install_order: 10,
+                location: crate::runtime_bundle::RuntimeOwnedAssetLocation::Slot(
+                    crate::runtime_bundle::OwnedRuntimeSlot {
+                        name: "lcd-init".to_string(),
+                        page: 0,
+                        element: 13,
+                        event: 0,
+                        asset: "lcd-init.lua".to_string(),
+                        install_order: 10,
+                    },
+                ),
             },
-            crate::runtime_bundle::OwnedRuntimeSlot {
+            crate::runtime_bundle::RuntimeOwnedAsset {
                 name: "lcd-draw".to_string(),
-                page: 0,
-                element: 13,
-                event: 8,
                 asset: "lcd-draw.lua".to_string(),
                 install_order: 20,
+                location: crate::runtime_bundle::RuntimeOwnedAssetLocation::Slot(
+                    crate::runtime_bundle::OwnedRuntimeSlot {
+                        name: "lcd-draw".to_string(),
+                        page: 0,
+                        element: 13,
+                        event: 8,
+                        asset: "lcd-draw.lua".to_string(),
+                        install_order: 20,
+                    },
+                ),
             },
         ];
         let report = RuntimeInstallReport::new_for_tests(
-            installed_slots.clone(),
+            installed_assets.clone(),
             RuntimeInspectionReport::new_for_tests(
                 ResolvedTarget::Explicit(source_target),
                 vec![source_target],
-                installed_slots
+                installed_assets
                     .iter()
                     .cloned()
-                    .map(|slot| crate::runtime::RuntimeSlotInspection {
-                        slot,
+                    .map(|asset| crate::runtime::RuntimeSlotInspection {
+                        asset,
                         status: RuntimeSlotStatus::Match { source_target },
                     })
                     .collect(),
@@ -2764,7 +2786,7 @@ mod tests {
         assert!(output.contains("- lcd-draw (page=0 element=13 event=8): match on dx=0 dy=0"));
         assert!(output.contains("Verification: exact installed runtime match confirmed."));
         assert!(output.contains("Resolved runtime: media (dev)"));
-        assert!(output.contains("Installed owned slots in manifest order:"));
+        assert!(output.contains("Installed owned assets in manifest order:"));
     }
 
     #[test]

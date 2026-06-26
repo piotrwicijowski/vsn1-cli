@@ -13,6 +13,12 @@ activation = "temporary"
 timeout_ms = 2000
 notes = "Temporary playback state overlay shown above the base layer."
 
+[[owned_files]]
+name = "media-runtime-module"
+path = "/vsn1_media_runtime.lua"
+asset = "vsn1_media_runtime.lua"
+install_order = 5
+
 [[owned_slots]]
 name = "lcd-init"
 page = 0
@@ -27,7 +33,7 @@ page = 0
 element = 13
 event = 8
 asset = "lcd-draw.lua"
-install_order = 20
+install_order = 15
 
 [[fields]]
 name = "base.artist"

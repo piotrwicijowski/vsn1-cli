@@ -6,7 +6,7 @@ use crate::protocol::LuaValue;
 use crate::runtime::{
     Result, RuntimeError, RuntimeEvaluateReport, RuntimeSlotRead, TransportRuntimeSlotReader,
 };
-use crate::runtime_bundle::OwnedRuntimeSlot;
+use crate::runtime_bundle::{RuntimeOwnedAsset, RuntimeOwnedAssetLocation};
 use crate::targeting::ResolvedTarget;
 use crate::transport::SerialTransport;
 
@@ -26,42 +26,45 @@ where
     }
 }
 
-pub(crate) fn derive_owned_slot_module_file_path(slot: &OwnedRuntimeSlot) -> Result<String> {
-    if !Path::new(&slot.asset)
+pub(crate) fn derive_owned_module_file_path(owned: &RuntimeOwnedAsset) -> Result<String> {
+    if !Path::new(&owned.asset)
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
     {
         return Err(RuntimeError::unexpected_response(format!(
             "module-files provisioning currently supports only runtime-owned .lua event files; slot {} uses asset {}",
-            slot.name, slot.asset
+            owned.name, owned.asset
         )));
     }
 
-    Ok(slot.derived_module_file_path())
+    match &owned.location {
+        RuntimeOwnedAssetLocation::Slot(slot) => Ok(slot.derived_module_file_path()),
+        RuntimeOwnedAssetLocation::File(file) => Ok(file.path.clone()),
+    }
 }
 
 pub(crate) fn read_owned_slot_module_file<E>(
     evaluator: &mut E,
     target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    owned: &RuntimeOwnedAsset,
 ) -> Result<Option<RuntimeSlotRead>>
 where
     E: ModuleFileEvaluator,
 {
-    read_owned_slot_module_file_with_progress(evaluator, target, slot, &mut || {})
+    read_owned_slot_module_file_with_progress(evaluator, target, owned, &mut || {})
 }
 
 pub(crate) fn read_owned_slot_module_file_with_progress<E>(
     evaluator: &mut E,
     target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    owned: &RuntimeOwnedAsset,
     on_step: &mut dyn FnMut(),
 ) -> Result<Option<RuntimeSlotRead>>
 where
     E: ModuleFileEvaluator,
 {
-    let path = derive_owned_slot_module_file_path(slot)?;
+    let path = derive_owned_module_file_path(owned)?;
     let mut content = String::new();
     let mut offset = 0usize;
     let mut source_target = None;
@@ -115,26 +118,26 @@ pub(crate) fn module_file_read_step_estimate(content: &str) -> usize {
 pub(crate) fn write_owned_slot_module_file_atomic<E>(
     evaluator: &mut E,
     target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    owned: &RuntimeOwnedAsset,
     content: &str,
 ) -> Result<()>
 where
     E: ModuleFileEvaluator,
 {
-    write_owned_slot_module_file_atomic_with_progress(evaluator, target, slot, content, &mut || {})
+    write_owned_slot_module_file_atomic_with_progress(evaluator, target, owned, content, &mut || {})
 }
 
 pub(crate) fn write_owned_slot_module_file_atomic_with_progress<E>(
     evaluator: &mut E,
     target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    owned: &RuntimeOwnedAsset,
     content: &str,
     on_step: &mut dyn FnMut(),
 ) -> Result<()>
 where
     E: ModuleFileEvaluator,
 {
-    let path = derive_owned_slot_module_file_path(slot)?;
+    let path = derive_owned_module_file_path(owned)?;
     let tmp_path = format!("{path}.tmp");
 
     for (index, chunk) in chunk_bytes(content.as_bytes(), WRITE_CHUNK_SIZE)
@@ -168,12 +171,12 @@ pub(crate) fn module_file_write_step_count(content: &str) -> usize {
 pub(crate) fn clear_owned_slot_module_file<E>(
     evaluator: &mut E,
     target: ResolvedTarget,
-    slot: &OwnedRuntimeSlot,
+    owned: &RuntimeOwnedAsset,
 ) -> Result<()>
 where
     E: ModuleFileEvaluator,
 {
-    let path = derive_owned_slot_module_file_path(slot)?;
+    let path = derive_owned_module_file_path(owned)?;
     let report = evaluator.evaluate_lua(target, &build_clear_file_lua(&path))?;
     decode_boolean_response(&format!("module file clear for {}", path), &report.values)?;
     Ok(())
@@ -301,35 +304,59 @@ mod tests {
         }
     }
 
-    fn fixture_slot() -> OwnedRuntimeSlot {
-        OwnedRuntimeSlot {
+    fn fixture_slot_asset() -> RuntimeOwnedAsset {
+        RuntimeOwnedAsset {
             name: "lcd-draw".to_string(),
-            page: 0,
-            element: 13,
-            event: 8,
             asset: "lcd-draw.lua".to_string(),
             install_order: 20,
+            location: RuntimeOwnedAssetLocation::Slot(crate::runtime_bundle::OwnedRuntimeSlot {
+                name: "lcd-draw".to_string(),
+                page: 0,
+                element: 13,
+                event: 8,
+                asset: "lcd-draw.lua".to_string(),
+                install_order: 20,
+            }),
         }
     }
 
     #[test]
     fn derives_lowercase_hex_module_file_paths_from_owned_slots() {
-        let path = derive_owned_slot_module_file_path(&fixture_slot()).unwrap();
+        let path = derive_owned_module_file_path(&fixture_slot_asset()).unwrap();
 
         assert_eq!(path, "/00/0d/08.cfg");
     }
 
     #[test]
     fn rejects_non_lua_assets_for_module_file_provisioning() {
-        let mut slot = fixture_slot();
-        slot.asset = "lcd-draw.txt".to_string();
+        let mut owned = fixture_slot_asset();
+        owned.asset = "lcd-draw.txt".to_string();
 
-        let error = derive_owned_slot_module_file_path(&slot).unwrap_err();
+        let error = derive_owned_module_file_path(&owned).unwrap_err();
 
         assert_eq!(
             error.to_string(),
             "runtime inspection failed: module-files provisioning currently supports only runtime-owned .lua event files; slot lcd-draw uses asset lcd-draw.txt"
         );
+    }
+
+    #[test]
+    fn uses_explicit_helper_module_file_paths_when_present() {
+        let owned = RuntimeOwnedAsset {
+            name: "helper".to_string(),
+            asset: "helper.lua".to_string(),
+            install_order: 10,
+            location: RuntimeOwnedAssetLocation::File(crate::runtime_bundle::OwnedRuntimeFile {
+                name: "helper".to_string(),
+                path: "/vsn1_media_draw.lua".to_string(),
+                asset: "helper.lua".to_string(),
+                install_order: 10,
+            }),
+        };
+
+        let path = derive_owned_module_file_path(&owned).unwrap();
+
+        assert_eq!(path, "/vsn1_media_draw.lua");
     }
 
     #[test]
@@ -347,7 +374,7 @@ mod tests {
         let content = read_owned_slot_module_file(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
         )
         .unwrap();
 
@@ -369,7 +396,7 @@ mod tests {
         let content = read_owned_slot_module_file(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
         )
         .unwrap();
 
@@ -392,7 +419,7 @@ mod tests {
         let content = read_owned_slot_module_file_with_progress(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
             &mut || steps += 1,
         )
         .unwrap();
@@ -410,7 +437,7 @@ mod tests {
         let content = read_owned_slot_module_file_with_progress(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
             &mut || steps += 1,
         )
         .unwrap();
@@ -430,7 +457,7 @@ mod tests {
         write_owned_slot_module_file_atomic(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
             &content,
         )
         .unwrap();
@@ -452,7 +479,7 @@ mod tests {
         write_owned_slot_module_file_atomic(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
             "",
         )
         .unwrap();
@@ -474,7 +501,7 @@ mod tests {
         write_owned_slot_module_file_atomic_with_progress(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
             &content,
             &mut || steps += 1,
         )
@@ -491,7 +518,7 @@ mod tests {
         clear_owned_slot_module_file(
             &mut evaluator,
             ResolvedTarget::Explicit(GridTarget::new(0, 0)),
-            &fixture_slot(),
+            &fixture_slot_asset(),
         )
         .unwrap();
 
