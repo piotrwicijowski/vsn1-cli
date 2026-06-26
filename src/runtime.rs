@@ -358,6 +358,19 @@ impl RuntimeInspectionReport {
             details.join("; ")
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(
+        requested_target: ResolvedTarget,
+        observed_targets: Vec<GridTarget>,
+        slot_inspections: Vec<RuntimeSlotInspection>,
+    ) -> Self {
+        Self {
+            requested_target,
+            observed_targets,
+            slot_inspections,
+        }
+    }
 }
 
 impl RuntimeInstallReport {
@@ -367,6 +380,17 @@ impl RuntimeInstallReport {
 
     pub fn verification_report(&self) -> &RuntimeInspectionReport {
         &self.verification_report
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(
+        installed_slots: Vec<OwnedRuntimeSlot>,
+        verification_report: RuntimeInspectionReport,
+    ) -> Self {
+        Self {
+            installed_slots,
+            verification_report,
+        }
     }
 }
 

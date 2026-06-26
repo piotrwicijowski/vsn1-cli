@@ -18,6 +18,7 @@ pub mod targeting;
 pub mod transport;
 
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -431,7 +432,9 @@ pub fn run(cli: Cli) -> Result<()> {
         &mut daemon_client,
         CommandRequest::from(cli),
     )?;
+    let _ = io::stderr().flush();
     print!("{output}");
+    let _ = io::stdout().flush();
     Ok(())
 }
 
@@ -2704,6 +2707,64 @@ mod tests {
 
         assert!(output.contains("Sent curated screen update over the immediate path."));
         assert_eq!(transport_factory.open_calls().len(), 1);
+    }
+
+    #[test]
+    fn runtime_install_rendering_includes_verification_summary_and_installed_slots() {
+        let source_target = protocol::GridTarget::new(0, 0);
+        let installed_slots = vec![
+            crate::runtime_bundle::OwnedRuntimeSlot {
+                name: "lcd-init".to_string(),
+                page: 0,
+                element: 13,
+                event: 0,
+                asset: "lcd-init.lua".to_string(),
+                install_order: 10,
+            },
+            crate::runtime_bundle::OwnedRuntimeSlot {
+                name: "lcd-draw".to_string(),
+                page: 0,
+                element: 13,
+                event: 8,
+                asset: "lcd-draw.lua".to_string(),
+                install_order: 20,
+            },
+        ];
+        let report = RuntimeInstallReport::new_for_tests(
+            installed_slots.clone(),
+            RuntimeInspectionReport::new_for_tests(
+                ResolvedTarget::Explicit(source_target),
+                vec![source_target],
+                installed_slots
+                    .iter()
+                    .cloned()
+                    .map(|slot| crate::runtime::RuntimeSlotInspection {
+                        slot,
+                        status: RuntimeSlotStatus::Match { source_target },
+                    })
+                    .collect(),
+            ),
+        );
+
+        let output = render_command_success(&CommandSuccess::RuntimeInstall {
+            device: test_device("/dev/ttyACM0").to_string(),
+            target: ResolvedTarget::Explicit(source_target),
+            runtime: Some(DiscoveredRuntime {
+                name: "media".to_string(),
+                path: std::path::PathBuf::from("/tmp/media"),
+                source: crate::runtime_bundle::RuntimeSource::Dev,
+            }),
+            report,
+        });
+
+        assert!(output.contains("Installed runtime: frozen copy present"));
+        assert!(output.contains("Status: exact-match compatible"));
+        assert!(output.contains("Observed runtime target: dx=0 dy=0"));
+        assert!(output.contains("- lcd-init (page=0 element=13 event=0): match on dx=0 dy=0"));
+        assert!(output.contains("- lcd-draw (page=0 element=13 event=8): match on dx=0 dy=0"));
+        assert!(output.contains("Verification: exact installed runtime match confirmed."));
+        assert!(output.contains("Resolved runtime: media (dev)"));
+        assert!(output.contains("Installed owned slots in manifest order:"));
     }
 
     #[test]
