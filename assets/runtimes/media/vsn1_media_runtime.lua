@@ -1,241 +1,232 @@
 local Module = {}
 
 local function format_seconds(seconds)
-    seconds = math.max(0, math.floor((tonumber(seconds) or 0) + 0.5))
-    local hours = math.floor(seconds / 3600)
-    local minutes = math.floor(seconds / 60) % 60
-    local remainder = seconds % 60
+	seconds = math.max(0, math.floor((tonumber(seconds) or 0) + 0.5))
+	local hours = math.floor(seconds / 3600)
+	local minutes = math.floor(seconds / 60) % 60
+	local remainder = seconds % 60
 
-    if hours > 0 then
-        return ("%d:%02d:%02d"):format(hours, minutes, remainder)
-    end
+	if hours > 0 then
+		return ("%d:%02d:%02d"):format(hours, minutes, remainder)
+	end
 
-    return ("%d:%02d"):format(minutes, remainder)
+	return ("%d:%02d"):format(minutes, remainder)
 end
 
 local function draw_player_overlay(self, name)
-    if name == "" then
-        return
-    end
+	if name == "" then
+		return
+	end
 
-    self:ldrrf(18, 112, 301, 150, 12, c[1])
-    self:ldrr(18, 112, 301, 150, 12, c[2])
-    self:ldft(name, 30, 124, 18, c[2])
+	self:ldrrf(18, 112, 301, 150, 12, c[1])
+	self:ldrr(18, 112, 301, 150, 12, c[2])
+	self:ldft(name, 30, 124, 18, c[2])
 end
 
 local function draw_playback_status_overlay(self, status)
-    if status == "" then
-        return
-    end
+	if status == "" then
+		return
+	end
 
-    local left = 116
-    local top = 76
-    local right = 204
-    local bottom = 164
-    local center_x = 160
-    local center_y = 120
-    local normalized = string.lower(status)
+	local left = 116
+	local top = 76
+	local right = 204
+	local bottom = 164
+	local center_x = 160
+	local center_y = 120
+	local normalized = string.lower(status)
 
-    self:ldrrf(left, top, right, bottom, 44, c[1])
+	self:ldrrf(left, top, right, bottom, 44, c[1])
 
-    if normalized == "paused" then
-        self:ldpof(
-            { center_x - 18, center_x - 6, center_x - 6, center_x - 18 },
-            { center_y - 24, center_y - 24, center_y + 24, center_y + 24 },
-            c[2]
-        )
-        self:ldpof(
-            { center_x + 6, center_x + 18, center_x + 18, center_x + 6 },
-            { center_y - 24, center_y - 24, center_y + 24, center_y + 24 },
-            c[2]
-        )
-        return
-    end
+	if normalized == "paused" then
+		self:ldpof(
+			{ center_x - 18, center_x - 6, center_x - 6, center_x - 18 },
+			{ center_y - 24, center_y - 24, center_y + 24, center_y + 24 },
+			c[2]
+		)
+		self:ldpof(
+			{ center_x + 6, center_x + 18, center_x + 18, center_x + 6 },
+			{ center_y - 24, center_y - 24, center_y + 24, center_y + 24 },
+			c[2]
+		)
+		return
+	end
 
-    if normalized == "playing" then
-        self:ldpof(
-            { center_x - 16, center_x - 16, center_x + 18 },
-            { center_y - 24, center_y + 24, center_y },
-            c[2]
-        )
-        return
-    end
+	if normalized == "playing" then
+		self:ldpof({ center_x - 16, center_x - 16, center_x + 18 }, { center_y - 24, center_y + 24, center_y }, c[2])
+		return
+	end
 
-    self:ldrr(82, 100, 238, 140, 10, c[2])
-    self:ldft(status, 96, 111, 18, c[2])
+	self:ldrr(82, 100, 238, 140, 10, c[2])
+	self:ldft(status, 96, 111, 18, c[2])
 end
 
 local function draw_volume_overlay(self, volume, mute)
-    local center_x = 160
-    local center_y = 120
-    local outer_radius = 44
-    local normalized = math.max(0, math.min(1, tonumber(volume) or 0))
+	local center_x = 160
+	local center_y = 120
+	local outer_radius = 44
+	local normalized = math.max(0, math.min(1, tonumber(volume) or 0))
 
-    self:ldrrf(
-        center_x - outer_radius,
-        center_y - outer_radius,
-        center_x + outer_radius,
-        center_y + outer_radius,
-        outer_radius,
-        c[1]
-    )
-    self:ldrr(
-        center_x - outer_radius,
-        center_y - outer_radius,
-        center_x + outer_radius,
-        center_y + outer_radius,
-        outer_radius,
-        c[2]
-    )
+	self:ldrrf(
+		center_x - outer_radius,
+		center_y - outer_radius,
+		center_x + outer_radius,
+		center_y + outer_radius,
+		outer_radius,
+		c[1]
+	)
+	self:ldrr(
+		center_x - outer_radius,
+		center_y - outer_radius,
+		center_x + outer_radius,
+		center_y + outer_radius,
+		outer_radius,
+		c[2]
+	)
 
-    local fill_radius = math.floor(40 * normalized)
-    if fill_radius > 0 then
-        self:ldrrf(
-            center_x - fill_radius,
-            center_y - fill_radius,
-            center_x + fill_radius,
-            center_y + fill_radius,
-            fill_radius,
-            c[3]
-        )
-    end
+	local fill_radius = math.floor(40 * normalized)
+	if fill_radius > 0 then
+		self:ldrrf(
+			center_x - fill_radius,
+			center_y - fill_radius,
+			center_x + fill_radius,
+			center_y + fill_radius,
+			fill_radius,
+			c[3]
+		)
+	end
 
-    if not mute then
-        return
-    end
+	if not mute then
+		return
+	end
 
-    self:ldpof(
-        { center_x - 30, center_x - 18, center_x - 18, center_x - 30 },
-        { center_y - 12, center_y - 12, center_y + 12, center_y + 12 },
-        c[2]
-    )
-    self:ldpof(
-        { center_x - 18, center_x - 2, center_x + 10, center_x + 10, center_x - 2 },
-        { center_y - 14, center_y - 14, center_y - 28, center_y + 28, center_y + 14 },
-        c[2]
-    )
-    self:ldpof(
-        { center_x + 10, center_x + 16, center_x + 34, center_x + 28 },
-        { center_y - 14, center_y - 20, center_y - 2, center_y + 4 },
-        c[2]
-    )
-    self:ldpof(
-        { center_x + 10, center_x + 16, center_x + 34, center_x + 28 },
-        { center_y + 14, center_y + 20, center_y + 2, center_y - 4 },
-        c[2]
-    )
+	self:ldpof(
+		{ center_x - 18, center_x - 2, center_x + 10, center_x + 10, center_x - 2, center_x - 18 },
+		{ center_y - 12, center_y - 12, center_y - 28, center_y + 28, center_y + 12, center_y + 12 },
+		c[2]
+	)
+	self:ldpof(
+		{ center_x - 24, center_x - 16, center_x + 24, center_x + 16 },
+		{ center_y - 16, center_y - 24, center_y + 16, center_y + 24 },
+		c[1]
+	)
+	self:ldpof(
+		{ center_x - 22, center_x - 16, center_x + 22, center_x + 16 },
+		{ center_y - 16, center_y - 22, center_y + 16, center_y + 22 },
+		c[2]
+	)
 end
 
 function Module.init()
-    glsb(255)
-    vsn1_cli_state = {
-        r = 1,
-        w = "",
-        b = "base",
-        u = {},
-        o = { "player", "playback_status", "volume" },
-        m = { base = 0, player = 5, playback_status = 2, volume = 1 },
-        l = {
-            base = { a = "", t = "", l = "", d = 0, p = 0 },
-            player = { n = "" },
-            playback_status = { s = "" },
-            volume = { v = 0, m = false },
-        },
-    }
-    c = c or {
-        { 0, 0, 0 },
-        { 255, 255, 255 },
-        { 255, 160, 60 },
-        { 160, 160, 160 },
-        { 208, 208, 208 },
-    }
+	glsb(255)
+	vsn1_cli_state = {
+		r = 1,
+		w = "",
+		b = "base",
+		u = {},
+		o = { "player", "playback_status", "volume" },
+		m = { base = 0, player = 5, playback_status = 2, volume = 1 },
+		l = {
+			base = { a = "", t = "", l = "", d = 0, p = 0 },
+			player = { n = "" },
+			playback_status = { s = "" },
+			volume = { v = 0, m = false },
+		},
+	}
+	c = c or {
+		{ 0, 0, 0 },
+		{ 255, 255, 255 },
+		{ 255, 160, 60 },
+		{ 160, 160, 160 },
+		{ 208, 208, 208 },
+	}
 end
 
 function Module.set_field(layer, key, value)
-    local fields = vsn1_cli_state.l[layer]
-    if fields then
-        fields[key] = value
-        vsn1_cli_state.r = 1
-    end
+	local fields = vsn1_cli_state.l[layer]
+	if fields then
+		fields[key] = value
+		vsn1_cli_state.r = 1
+	end
 end
 
 function Module.activate_layer(layer)
-    local timeout = vsn1_cli_state.m[layer]
-    if timeout == nil then
-        return
-    end
+	local timeout = vsn1_cli_state.m[layer]
+	if timeout == nil then
+		return
+	end
 
-    if timeout > 0 then
-        vsn1_cli_state.u[layer] = os.clock() + timeout
-    else
-        vsn1_cli_state.b = layer
-    end
+	if timeout > 0 then
+		vsn1_cli_state.u[layer] = os.clock() + timeout
+	else
+		vsn1_cli_state.b = layer
+	end
 
-    vsn1_cli_state.r = 1
+	vsn1_cli_state.r = 1
 end
 
 function Module.draw(self)
-    local state = vsn1_cli_state
-    local now = os.clock()
-    local layers = state.l
-    local expiries = state.u
-    local active = {}
-    local signature = state.b
+	local state = vsn1_cli_state
+	local now = os.clock()
+	local layers = state.l
+	local expiries = state.u
+	local active = {}
+	local signature = state.b
 
-    for i = 1, #state.o do
-        local candidate = state.o[i]
-        if (expiries[candidate] or 0) > now then
-            active[#active + 1] = candidate
-        end
-    end
+	for i = 1, #state.o do
+		local candidate = state.o[i]
+		if (expiries[candidate] or 0) > now then
+			active[#active + 1] = candidate
+		end
+	end
 
-    if #active > 0 then
-        signature = signature .. ":" .. table.concat(active, ",")
-    end
+	if #active > 0 then
+		signature = signature .. ":" .. table.concat(active, ",")
+	end
 
-    if state.r == 0 and state.w == signature then
-        return
-    end
+	if state.r == 0 and state.w == signature then
+		return
+	end
 
-    state.r = 0
-    state.w = signature
+	state.r = 0
+	state.w = signature
 
-    local base = layers.base
-    local duration = base.d
-    local progress = 0
-    if duration > 0 then
-        progress = base.p / duration
-    end
-    if progress < 0 then
-        progress = 0
-    elseif progress > 1 then
-        progress = 1
-    end
+	local base = layers.base
+	local duration = base.d
+	local progress = 0
+	if duration > 0 then
+		progress = base.p / duration
+	end
+	if progress < 0 then
+		progress = 0
+	elseif progress > 1 then
+		progress = 1
+	end
 
-    self:ldaf(0, 0, 319, 239, c[1])
-    self:ldft(base.a, 18, 18, 12, c[4])
-    self:ldft(base.t, 18, 52, 16, c[2])
-    self:ldft(base.l, 18, 86, 12, c[5])
-    self:ldrr(18, 178, 301, 202, 8, c[2])
-    local fill = 18 + math.floor(283 * progress)
-    if fill > 18 then
-        self:ldrrf(19, 179, fill, 201, 7, c[3])
-    end
-    self:ldft(format_seconds(base.p), 18, 212, 16, c[2])
-    self:ldft(format_seconds(duration), 252, 212, 16, c[2])
+	self:ldaf(0, 0, 319, 239, c[1])
+	self:ldft(base.a, 18, 18, 12, c[4])
+	self:ldft(base.t, 18, 52, 16, c[2])
+	self:ldft(base.l, 18, 86, 12, c[5])
+	self:ldrr(18, 178, 301, 202, 8, c[2])
+	local fill = 18 + math.floor(283 * progress)
+	if fill > 18 then
+		self:ldrrf(19, 179, fill, 201, 7, c[3])
+	end
+	self:ldft(format_seconds(base.p), 18, 212, 16, c[2])
+	self:ldft(format_seconds(duration), 252, 212, 16, c[2])
 
-    for i = 1, #active do
-        local layer = active[i]
-        if layer == "player" then
-            draw_player_overlay(self, layers.player.n)
-        elseif layer == "playback_status" then
-            draw_playback_status_overlay(self, layers.playback_status.s)
-        elseif layer == "volume" then
-            draw_volume_overlay(self, layers.volume.v, layers.volume.m)
-        end
-    end
+	for i = 1, #active do
+		local layer = active[i]
+		if layer == "player" then
+			draw_player_overlay(self, layers.player.n)
+		elseif layer == "playback_status" then
+			draw_playback_status_overlay(self, layers.playback_status.s)
+		elseif layer == "volume" then
+			draw_volume_overlay(self, layers.volume.v, layers.volume.m)
+		end
+	end
 
-    self:ldsw()
+	self:ldsw()
 end
 
 return Module
