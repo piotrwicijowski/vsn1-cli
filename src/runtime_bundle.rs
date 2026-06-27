@@ -225,13 +225,7 @@ impl RuntimeBundle {
                 message: error.to_string(),
             }
         })?;
-        let manifest: RuntimeBundleManifest =
-            toml::from_str(&manifest_text).map_err(|error| RuntimeBundleError::ParseManifest {
-                path: manifest_path,
-                message: error.to_string(),
-            })?;
-
-        validate_manifest(&manifest)?;
+        let manifest = parse_runtime_bundle_manifest_text(&manifest_path, &manifest_text)?;
 
         let mut assets = Vec::new();
         for slot in manifest.owned_slots.iter().cloned() {
@@ -469,6 +463,21 @@ pub fn normalize_text_content(content: &str) -> String {
 
 pub fn normalized_sha256(content: &str) -> String {
     sha256_hex(normalize_text_content(content).as_bytes())
+}
+
+pub(crate) fn parse_runtime_bundle_manifest_text(
+    manifest_path: impl AsRef<Path>,
+    manifest_text: &str,
+) -> Result<RuntimeBundleManifest> {
+    let manifest_path = manifest_path.as_ref().to_path_buf();
+    let manifest: RuntimeBundleManifest =
+        toml::from_str(manifest_text).map_err(|error| RuntimeBundleError::ParseManifest {
+            path: manifest_path,
+            message: error.to_string(),
+        })?;
+
+    validate_manifest(&manifest)?;
+    Ok(manifest)
 }
 
 fn validate_manifest(manifest: &RuntimeBundleManifest) -> Result<()> {

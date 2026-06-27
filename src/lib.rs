@@ -32,10 +32,10 @@ use crate::device::{
 };
 use crate::raw::send_screen_raw;
 use crate::runtime::{
-    inspect_installed_runtime, install_runtime_with_bundle_dir, remove_installed_runtime,
-    repair_installed_runtime, upgrade_runtime_with_bundle_dir, verify_installed_runtime,
-    RuntimeInspectionReport, RuntimeInstallReport, RuntimeRemoveReport, RuntimeSlotStatus,
-    RuntimeUpgradeReport, TransportRuntimeSlotReader,
+    fetch_runtime_from_module, inspect_installed_runtime, install_runtime_with_bundle_dir,
+    remove_installed_runtime, repair_installed_runtime, upgrade_runtime_with_bundle_dir,
+    verify_installed_runtime, RuntimeFetchReport, RuntimeInspectionReport, RuntimeInstallReport,
+    RuntimeRemoveReport, RuntimeSlotStatus, RuntimeUpgradeReport, TransportRuntimeSlotReader,
 };
 use crate::runtime_bundle::{discover_runtimes, resolve_runtime, DiscoveredRuntime};
 use crate::screen::{
@@ -55,6 +55,7 @@ const DEVICE_PAGE_DISCARD_AFTER_HELP: &str =
     "Examples:\n  vsn1-cli device page-discard\n  vsn1-cli device page-discard --dx 0 --dy 0\n\nThis sends a raw PAGEDISCARD command over the config path to validate whether the firmware can reload stored page configuration without a power cycle.";
 const RUNTIME_LIST_AFTER_HELP: &str = "Lists discovered runtime names and the source copy that won resolution. Discovery precedence is dev > user > system on directory-name collisions.";
 const RUNTIME_INSTALL_AFTER_HELP: &str = "Installs the selected discovered runtime into the manifest-owned slots, captures a pre-install backup under ~/.config/vsn1-cli/pre-install, freezes the runtime under ~/.config/vsn1-cli/runtime, and verifies an exact installed-runtime match.";
+const RUNTIME_FETCH_AFTER_HELP: &str = "Fetches the module-stored runtime manifest plus all declared owned runtime files and rebuilds ~/.config/vsn1-cli/runtime locally. This command runs on the cold path so fetch progress remains visible.";
 const RUNTIME_VERIFY_AFTER_HELP: &str = "Fails unless every owned runtime slot matches the frozen installed runtime copy under ~/.config/vsn1-cli/runtime exactly.";
 const RUNTIME_UPGRADE_AFTER_HELP: &str = "Overwrites the device from the selected discovered runtime, refreshes the frozen runtime copy under ~/.config/vsn1-cli/runtime, and does not refresh the pre-install backup.";
 const RUNTIME_REPAIR_AFTER_HELP: &str =
@@ -164,6 +165,14 @@ pub enum RuntimeCommand {
     Install {
         #[arg(value_name = "NAME", help = "Discovered runtime name to install")]
         name: String,
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    #[command(
+        about = "Rebuild the frozen installed runtime from the module-stored runtime files",
+        after_help = RUNTIME_FETCH_AFTER_HELP
+    )]
+    Fetch {
         #[command(flatten)]
         target: TargetArgs,
     },
@@ -336,6 +345,11 @@ pub enum CommandSuccess {
         target: ResolvedTarget,
         runtime: Option<DiscoveredRuntime>,
         report: RuntimeInstallReport,
+    },
+    RuntimeFetch {
+        device: String,
+        target: ResolvedTarget,
+        report: RuntimeFetchReport,
     },
     RuntimeUpgrade {
         device: String,
@@ -584,6 +598,11 @@ pub fn render_command_success(success: &CommandSuccess) -> String {
             runtime,
             report,
         } => render_runtime_install_output(device, *target, runtime.as_ref(), report),
+        CommandSuccess::RuntimeFetch {
+            device,
+            target,
+            report,
+        } => render_runtime_fetch_output(device, *target, report),
         CommandSuccess::RuntimeUpgrade {
             device,
             target,
@@ -643,6 +662,9 @@ where
             RuntimeRequest::List => execute_runtime_list(),
             RuntimeRequest::Install { name, target } => {
                 execute_runtime_install(discovery, transport_factory, &name, &target)
+            }
+            RuntimeRequest::Fetch { target } => {
+                execute_runtime_fetch(discovery, transport_factory, &target)
             }
             RuntimeRequest::Verify { target } => {
                 execute_runtime_verify(discovery, transport_factory, &target)
@@ -1026,6 +1048,28 @@ where
     })
 }
 
+fn execute_runtime_fetch<D, F>(
+    discovery: &D,
+    transport_factory: &mut F,
+    target_args: &TargetArgs,
+) -> Result<CommandSuccess>
+where
+    D: DeviceDiscovery,
+    F: SerialTransportFactory,
+{
+    let target = resolve_target(target_args)?;
+    let device = resolve_usb_device(discovery, target_args)?;
+    let transport = transport_factory.open(&device.port_name, protocol::GRID_BAUD_RATE)?;
+    let mut reader = TransportRuntimeSlotReader::new(transport)?;
+    let report = fetch_runtime_from_module(target, &mut reader)?;
+
+    Ok(CommandSuccess::RuntimeFetch {
+        device: device.to_string(),
+        target,
+        report,
+    })
+}
+
 fn execute_runtime_status<D, F>(
     discovery: &D,
     transport_factory: &mut F,
@@ -1235,6 +1279,29 @@ fn render_runtime_install_output(
 
     output.push_str("Installed owned assets in manifest order:\n");
     for asset in report.installed_assets() {
+        output.push_str(&format!(
+            "- {} ({})\n",
+            asset.name,
+            asset.location_display()
+        ));
+    }
+
+    output
+}
+
+fn render_runtime_fetch_output(
+    device: &str,
+    requested_target: ResolvedTarget,
+    report: &RuntimeFetchReport,
+) -> String {
+    let mut output = format!(
+        "Selected USB device: {device}\nTransport: opened successfully at {} baud\nModule target: {requested_target}\nFetched runtime manifest: /vsn1-cli-runtime-manifest.toml\nObserved runtime target: dx={} dy={}\nFetched runtime: rebuilt ~/.config/vsn1-cli/runtime from module storage\nFetched owned assets in manifest order:\n",
+        protocol::GRID_BAUD_RATE,
+        report.source_target().dx,
+        report.source_target().dy,
+    );
+
+    for asset in report.fetched_assets() {
         output.push_str(&format!(
             "- {} ({})\n",
             asset.name,
@@ -1795,6 +1862,28 @@ mod tests {
                     command: RuntimeCommand::Install {
                         name: "default".to_string(),
                         target: TargetArgs::default(),
+                    },
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_runtime_fetch_with_target() {
+        let cli =
+            try_parse_from(["vsn1-cli", "runtime", "fetch", "--dx", "0", "--dy", "0"]).unwrap();
+
+        assert_eq!(
+            cli,
+            Cli {
+                debug: false,
+                command: TopLevelCommand::Runtime(RuntimeArgs {
+                    command: RuntimeCommand::Fetch {
+                        target: TargetArgs {
+                            device: None,
+                            dx: Some(0),
+                            dy: Some(0),
+                        },
                     },
                 }),
             }
@@ -2787,6 +2876,38 @@ mod tests {
         assert!(output.contains("Verification: exact installed runtime match confirmed."));
         assert!(output.contains("Resolved runtime: media (dev)"));
         assert!(output.contains("Installed owned assets in manifest order:"));
+    }
+
+    #[test]
+    fn renders_runtime_fetch_with_observed_target_and_owned_assets() {
+        let source_target = crate::protocol::GridTarget::new(0, 0);
+        let fetched_assets = vec![crate::runtime_bundle::RuntimeOwnedAsset {
+            name: "lcd-draw".to_string(),
+            asset: "lcd-draw.lua".to_string(),
+            install_order: 20,
+            location: crate::runtime_bundle::RuntimeOwnedAssetLocation::Slot(
+                crate::runtime_bundle::OwnedRuntimeSlot {
+                    name: "lcd-draw".to_string(),
+                    page: 0,
+                    element: 13,
+                    event: 8,
+                    asset: "lcd-draw.lua".to_string(),
+                    install_order: 20,
+                },
+            ),
+        }];
+
+        let output = render_command_success(&CommandSuccess::RuntimeFetch {
+            device: test_device("/dev/ttyACM0").to_string(),
+            target: ResolvedTarget::Explicit(source_target),
+            report: RuntimeFetchReport::new_for_tests(source_target, fetched_assets),
+        });
+
+        assert!(output.contains("Fetched runtime manifest: /vsn1-cli-runtime-manifest.toml"));
+        assert!(output.contains("Observed runtime target: dx=0 dy=0"));
+        assert!(output
+            .contains("Fetched runtime: rebuilt ~/.config/vsn1-cli/runtime from module storage"));
+        assert!(output.contains("Fetched owned assets in manifest order:"));
     }
 
     #[test]

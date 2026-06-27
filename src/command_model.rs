@@ -30,6 +30,7 @@ pub enum DeviceRequest {
 pub enum RuntimeRequest {
     List,
     Install { name: String, target: TargetArgs },
+    Fetch { target: TargetArgs },
     Verify { target: TargetArgs },
     Upgrade { name: String, target: TargetArgs },
     Repair { target: TargetArgs },
@@ -67,6 +68,7 @@ impl CommandRequest {
             Self::Device(DeviceRequest::PageDiscard { .. }) => "device page-discard",
             Self::Runtime(RuntimeRequest::List) => "runtime list",
             Self::Runtime(RuntimeRequest::Install { .. }) => "runtime install",
+            Self::Runtime(RuntimeRequest::Fetch { .. }) => "runtime fetch",
             Self::Runtime(RuntimeRequest::Verify { .. }) => "runtime verify",
             Self::Runtime(RuntimeRequest::Upgrade { .. }) => "runtime upgrade",
             Self::Runtime(RuntimeRequest::Repair { .. }) => "runtime repair",
@@ -81,9 +83,9 @@ impl CommandRequest {
 
     pub fn routing(&self) -> CommandRouting {
         match self {
-            Self::Device(DeviceRequest::List) | Self::Runtime(RuntimeRequest::List) => {
-                CommandRouting::LocalOnly
-            }
+            Self::Device(DeviceRequest::List)
+            | Self::Runtime(RuntimeRequest::List)
+            | Self::Runtime(RuntimeRequest::Fetch { .. }) => CommandRouting::LocalOnly,
             Self::Device(DeviceRequest::Info { .. })
             | Self::Device(DeviceRequest::PageStore { .. })
             | Self::Device(DeviceRequest::PageDiscard { .. })
@@ -141,6 +143,7 @@ impl From<RuntimeArgs> for RuntimeRequest {
         match value.command {
             RuntimeCommand::List => Self::List,
             RuntimeCommand::Install { name, target } => Self::Install { name, target },
+            RuntimeCommand::Fetch { target } => Self::Fetch { target },
             RuntimeCommand::Verify { target } => Self::Verify { target },
             RuntimeCommand::Upgrade { name, target } => Self::Upgrade { name, target },
             RuntimeCommand::Repair { target } => Self::Repair { target },
@@ -177,6 +180,10 @@ mod tests {
     fn classifies_discovery_only_commands_as_local_only() {
         assert!(CommandRequest::Device(DeviceRequest::List).is_local_only());
         assert!(CommandRequest::Runtime(RuntimeRequest::List).is_local_only());
+        assert!(CommandRequest::Runtime(RuntimeRequest::Fetch {
+            target: TargetArgs::default(),
+        })
+        .is_local_only());
     }
 
     #[test]

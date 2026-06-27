@@ -171,6 +171,11 @@ where
                     crate::daemon_protocol::DaemonProtocolError::LocalOnlyCommand,
                 ),
             )),
+            RuntimeRequest::Fetch { .. } => Err(crate::Error::from(
+                crate::daemon_client::DaemonClientError::Protocol(
+                    crate::daemon_protocol::DaemonProtocolError::LocalOnlyCommand,
+                ),
+            )),
             RuntimeRequest::Verify { target } => {
                 let resolved_target = resolve_target(&target)?;
                 let device = resolve_usb_device(&self.discovery, &target)?;

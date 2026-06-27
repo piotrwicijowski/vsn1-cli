@@ -8,18 +8,20 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::debug;
 use crate::module_files::{
-    clear_owned_slot_module_file, module_file_read_step_estimate, module_file_write_step_count,
-    read_owned_slot_module_file, read_owned_slot_module_file_with_progress,
-    write_owned_slot_module_file_atomic, write_owned_slot_module_file_atomic_with_progress,
+    clear_module_file, derive_owned_module_file_path, module_file_read_step_estimate,
+    module_file_write_step_count, read_module_file, read_module_file_with_progress,
+    write_module_file_atomic, write_module_file_atomic_with_progress,
 };
 use crate::protocol::{
     self, ConfigFetch, ConfigLocation, ConfigWrite, EvaluateWrite, GridTarget, Heartbeat, LuaValue,
     PacketIdentity, PageActive, PageDiscard, PageStore, ProtocolError,
 };
 use crate::runtime_bundle::{
-    normalize_text_content, normalized_sha256, OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle,
-    RuntimeBundleError, RuntimeLayerSpec, RuntimeOwnedAsset, RuntimeProvisioningBackend,
+    normalize_text_content, normalized_sha256, parse_runtime_bundle_manifest_text,
+    OwnedRuntimeSlot, RuntimeAsset, RuntimeBundle, RuntimeBundleError, RuntimeBundleManifest,
+    RuntimeLayerSpec, RuntimeOwnedAsset, RuntimeOwnedAssetLocation, RuntimeProvisioningBackend,
 };
 use crate::targeting::ResolvedTarget;
 use crate::transport::{SerialTransport, TransportError};
@@ -40,11 +42,13 @@ const GRID_CONST_ETX: u8 = 0x03;
 const GRID_CONST_EOT: u8 = 0x04;
 const GRID_CONST_LF: u8 = 0x0a;
 const GRID_CLASS_CONFIG: usize = 0x060;
+const GRID_CLASS_PAGEACTIVE: usize = 0x030;
 const GRID_CLASS_PAGESTORE: usize = 0x061;
 const GRID_CLASS_PAGEDISCARD: usize = 0x063;
 const GRID_INSTR_ACKNOWLEDGE: usize = 0x0a;
 const GRID_INSTR_NACKNOWLEDGE: usize = 0x0b;
 const GRID_INSTR_REPORT: usize = 0x0d;
+const MODULE_RUNTIME_MANIFEST_PATH: &str = "/vsn1-cli-runtime-manifest.toml";
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
@@ -87,11 +91,50 @@ pub trait RuntimeSlotClearer {
 }
 
 pub trait RuntimeModuleFileAccessor {
+    fn read_module_file_path(
+        &mut self,
+        target: ResolvedTarget,
+        path: &str,
+    ) -> Result<Option<RuntimeSlotRead>>;
+
+    fn read_module_file_path_with_progress(
+        &mut self,
+        target: ResolvedTarget,
+        path: &str,
+        on_step: &mut dyn FnMut(),
+    ) -> Result<Option<RuntimeSlotRead>> {
+        let _ = on_step;
+        self.read_module_file_path(target, path)
+    }
+
+    fn write_module_file_path(
+        &mut self,
+        target: ResolvedTarget,
+        path: &str,
+        content: &str,
+    ) -> Result<()>;
+
+    fn write_module_file_path_with_progress(
+        &mut self,
+        target: ResolvedTarget,
+        path: &str,
+        content: &str,
+        on_step: &mut dyn FnMut(),
+    ) -> Result<()> {
+        let _ = on_step;
+        self.write_module_file_path(target, path, content)
+    }
+
+    fn clear_module_file_path(&mut self, target: ResolvedTarget, path: &str) -> Result<()>;
+
     fn read_owned_module_file(
         &mut self,
         target: ResolvedTarget,
         asset: &RuntimeOwnedAsset,
-    ) -> Result<Option<RuntimeSlotRead>>;
+    ) -> Result<Option<RuntimeSlotRead>> {
+        let path = derive_owned_module_file_path(asset)?;
+        self.read_module_file_path(target, &path)
+    }
 
     fn read_owned_module_file_with_progress(
         &mut self,
@@ -99,15 +142,18 @@ pub trait RuntimeModuleFileAccessor {
         asset: &RuntimeOwnedAsset,
         on_step: &mut dyn FnMut(),
     ) -> Result<Option<RuntimeSlotRead>> {
-        let _ = on_step;
-        self.read_owned_module_file(target, asset)
+        let path = derive_owned_module_file_path(asset)?;
+        self.read_module_file_path_with_progress(target, &path, on_step)
     }
 
     fn write_owned_module_file(
         &mut self,
         target: ResolvedTarget,
         asset: &RuntimeAsset,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let path = derive_owned_module_file_path(&asset.owned)?;
+        self.write_module_file_path(target, &path, &asset.stored_content)
+    }
 
     fn write_owned_module_file_with_progress(
         &mut self,
@@ -115,15 +161,18 @@ pub trait RuntimeModuleFileAccessor {
         asset: &RuntimeAsset,
         on_step: &mut dyn FnMut(),
     ) -> Result<()> {
-        let _ = on_step;
-        self.write_owned_module_file(target, asset)
+        let path = derive_owned_module_file_path(&asset.owned)?;
+        self.write_module_file_path_with_progress(target, &path, &asset.stored_content, on_step)
     }
 
     fn clear_owned_module_file(
         &mut self,
         target: ResolvedTarget,
         asset: &RuntimeOwnedAsset,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let path = derive_owned_module_file_path(asset)?;
+        self.clear_module_file_path(target, &path)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +212,12 @@ pub struct RuntimeRemoveReport {
     removed_assets: Vec<RuntimeOwnedAsset>,
     restored_from_backup: bool,
     warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeFetchReport {
+    source_target: GridTarget,
+    fetched_assets: Vec<RuntimeOwnedAsset>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -426,6 +481,27 @@ impl RuntimeRemoveReport {
     }
 }
 
+impl RuntimeFetchReport {
+    pub fn source_target(&self) -> GridTarget {
+        self.source_target
+    }
+
+    pub fn fetched_assets(&self) -> &[RuntimeOwnedAsset] {
+        &self.fetched_assets
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(
+        source_target: GridTarget,
+        fetched_assets: Vec<RuntimeOwnedAsset>,
+    ) -> Self {
+        Self {
+            source_target,
+            fetched_assets,
+        }
+    }
+}
+
 impl<T> TransportRuntimeSlotReader<T>
 where
     T: SerialTransport,
@@ -501,6 +577,14 @@ where
         target: ResolvedTarget,
         lua: &str,
     ) -> Result<RuntimeEvaluateReport> {
+        debug::log(
+            "runtime-evaluate",
+            format!(
+                "sending EVALUATE to {} with lua {:?}",
+                target,
+                truncate_debug_text(lua, 160)
+            ),
+        );
         self.transport.clear_input()?;
 
         let identity = self.next_identity();
@@ -643,52 +727,44 @@ impl<T> RuntimeModuleFileAccessor for TransportRuntimeSlotReader<T>
 where
     T: SerialTransport,
 {
-    fn read_owned_module_file(
+    fn read_module_file_path(
         &mut self,
         target: ResolvedTarget,
-        asset: &RuntimeOwnedAsset,
+        path: &str,
     ) -> Result<Option<RuntimeSlotRead>> {
-        read_owned_slot_module_file(self, target, asset)
+        read_module_file(self, target, path)
     }
 
-    fn read_owned_module_file_with_progress(
+    fn read_module_file_path_with_progress(
         &mut self,
         target: ResolvedTarget,
-        asset: &RuntimeOwnedAsset,
+        path: &str,
         on_step: &mut dyn FnMut(),
     ) -> Result<Option<RuntimeSlotRead>> {
-        read_owned_slot_module_file_with_progress(self, target, asset, on_step)
+        read_module_file_with_progress(self, target, path, on_step)
     }
 
-    fn write_owned_module_file(
+    fn write_module_file_path(
         &mut self,
         target: ResolvedTarget,
-        asset: &RuntimeAsset,
+        path: &str,
+        content: &str,
     ) -> Result<()> {
-        write_owned_slot_module_file_atomic(self, target, &asset.owned, &asset.stored_content)
+        write_module_file_atomic(self, target, path, content)
     }
 
-    fn write_owned_module_file_with_progress(
+    fn write_module_file_path_with_progress(
         &mut self,
         target: ResolvedTarget,
-        asset: &RuntimeAsset,
+        path: &str,
+        content: &str,
         on_step: &mut dyn FnMut(),
     ) -> Result<()> {
-        write_owned_slot_module_file_atomic_with_progress(
-            self,
-            target,
-            &asset.owned,
-            &asset.stored_content,
-            on_step,
-        )
+        write_module_file_atomic_with_progress(self, target, path, content, on_step)
     }
 
-    fn clear_owned_module_file(
-        &mut self,
-        target: ResolvedTarget,
-        asset: &RuntimeOwnedAsset,
-    ) -> Result<()> {
-        clear_owned_slot_module_file(self, target, asset)
+    fn clear_module_file_path(&mut self, target: ResolvedTarget, path: &str) -> Result<()> {
+        clear_module_file(self, target, path)
     }
 }
 
@@ -842,7 +918,11 @@ struct RuntimeProvisioningProgressBar {
 }
 
 impl RuntimeProvisioningProgressBar {
-    fn for_install_bundle(bundle: &RuntimeBundle, capture_pre_install: bool) -> Option<Self> {
+    fn for_install_bundle(
+        bundle: &RuntimeBundle,
+        module_manifest_text: &str,
+        capture_pre_install: bool,
+    ) -> Option<Self> {
         if bundle.manifest().provisioning_backend != RuntimeProvisioningBackend::ModuleFiles
             || !io::stderr().is_terminal()
         {
@@ -856,12 +936,13 @@ impl RuntimeProvisioningProgressBar {
             .iter()
             .map(|asset| module_file_write_step_count(&asset.stored_content))
             .sum::<usize>();
+        let manifest_steps = module_file_write_step_count(module_manifest_text);
         let verify_steps = bundle
             .assets()
             .iter()
             .map(|asset| module_file_read_step_estimate(&asset.stored_content))
             .sum::<usize>();
-        let total_steps = backup_steps + upload_steps + 1 + verify_steps;
+        let total_steps = backup_steps + upload_steps + manifest_steps + 1 + verify_steps;
 
         Some(Self::new("Runtime provisioning", total_steps))
     }
@@ -880,6 +961,14 @@ impl RuntimeProvisioningProgressBar {
             .sum::<usize>();
 
         Some(Self::new("Runtime verification", total_steps))
+    }
+
+    fn for_fetch() -> Option<Self> {
+        if !io::stderr().is_terminal() {
+            return None;
+        }
+
+        Some(Self::new("Runtime fetch", 1))
     }
 
     fn new(label: &'static str, total_steps: usize) -> Self {
@@ -967,6 +1056,16 @@ fn advance_runtime_provisioning_progress(
     }
 }
 
+fn read_bundle_manifest_text(bundle_root: &Path) -> Result<String> {
+    let manifest_path = bundle_root.join("manifest.toml");
+    fs::read_to_string(&manifest_path).map_err(|error| {
+        RuntimeError::host_storage(format!(
+            "failed to read runtime manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })
+}
+
 fn install_runtime_bundle_with_storage<R>(
     bundle: &RuntimeBundle,
     requested_target: ResolvedTarget,
@@ -977,8 +1076,12 @@ fn install_runtime_bundle_with_storage<R>(
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
-    let mut progress =
-        RuntimeProvisioningProgressBar::for_install_bundle(bundle, capture_pre_install);
+    let module_manifest_text = read_bundle_manifest_text(bundle.root())?;
+    let mut progress = RuntimeProvisioningProgressBar::for_install_bundle(
+        bundle,
+        &module_manifest_text,
+        capture_pre_install,
+    );
 
     if capture_pre_install {
         set_runtime_provisioning_phase(progress.as_mut(), "backing up existing runtime");
@@ -991,7 +1094,13 @@ where
         )?;
     }
 
-    let report = install_runtime_bundle(bundle, requested_target, reader, progress.as_mut())?;
+    let report = install_runtime_bundle(
+        bundle,
+        Some(&module_manifest_text),
+        requested_target,
+        reader,
+        progress.as_mut(),
+    )?;
     replace_directory_copy(
         bundle.root(),
         &installed_runtime_dir_from_root(storage_root),
@@ -1142,8 +1251,135 @@ where
     Ok(report)
 }
 
+pub fn fetch_runtime_from_module<R>(
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeFetchReport>
+where
+    R: RuntimeModuleFileAccessor,
+{
+    let storage_root = required_runtime_config_root_dir()?;
+    fetch_runtime_from_module_with_storage(&storage_root, requested_target, reader)
+}
+
+fn fetch_runtime_from_module_with_storage<R>(
+    storage_root: &Path,
+    requested_target: ResolvedTarget,
+    reader: &mut R,
+) -> Result<RuntimeFetchReport>
+where
+    R: RuntimeModuleFileAccessor,
+{
+    let installed_dir = installed_runtime_dir_from_root(storage_root);
+    let staging_dir = staging_dir_for(&installed_dir);
+    let mut progress = RuntimeProvisioningProgressBar::for_fetch();
+
+    set_runtime_provisioning_phase(progress.as_mut(), "reading module manifest");
+    let manifest_read = {
+        let estimated_steps = 1usize;
+        let mut observed_steps = 0usize;
+        let mut on_step = || {
+            advance_runtime_provisioning_progress(
+                progress.as_mut(),
+                "reading module manifest",
+                usize::from(observed_steps >= estimated_steps),
+            );
+            observed_steps += 1;
+        };
+        reader.read_module_file_path_with_progress(
+            requested_target,
+            MODULE_RUNTIME_MANIFEST_PATH,
+            &mut on_step,
+        )?
+    }
+    .ok_or_else(|| {
+        RuntimeError::verification_failed(format!(
+            "no module-stored runtime manifest was found at {}",
+            MODULE_RUNTIME_MANIFEST_PATH
+        ))
+    })?;
+
+    let manifest = parse_runtime_bundle_manifest_text(
+        Path::new(MODULE_RUNTIME_MANIFEST_PATH),
+        &manifest_read.content,
+    )?;
+    let fetched_assets = runtime_owned_assets_from_manifest(&manifest);
+
+    if let Some(progress) = progress.as_mut() {
+        progress.add_total_steps(fetched_assets.len() + 2);
+    }
+
+    remove_directory_if_exists(&staging_dir)?;
+    fs::create_dir_all(&staging_dir).map_err(|error| {
+        RuntimeError::host_storage(format!(
+            "failed to create runtime fetch staging directory {}: {error}",
+            staging_dir.display()
+        ))
+    })?;
+    write_staged_runtime_file(&staging_dir, "manifest.toml", &manifest_read.content)?;
+
+    set_runtime_provisioning_phase(progress.as_mut(), "downloading runtime files");
+    for asset in &fetched_assets {
+        let module_path = asset
+            .module_file_path()
+            .expect("runtime-owned assets always have a module-file path");
+        let estimated_steps = 1usize;
+        let mut observed_steps = 0usize;
+        let mut on_step = || {
+            advance_runtime_provisioning_progress(
+                progress.as_mut(),
+                "downloading runtime files",
+                usize::from(observed_steps >= estimated_steps),
+            );
+            observed_steps += 1;
+        };
+        let read = reader
+            .read_module_file_path_with_progress(requested_target, &module_path, &mut on_step)?
+            .ok_or_else(|| {
+                RuntimeError::verification_failed(format!(
+                    "module runtime asset {} is missing at {}",
+                    asset.name, module_path
+                ))
+            })?;
+
+        if read.source_target != manifest_read.source_target {
+            return Err(RuntimeError::verification_failed(format!(
+                "module runtime fetch mixed responses from dx={} dy={} and dx={} dy={}",
+                manifest_read.source_target.dx,
+                manifest_read.source_target.dy,
+                read.source_target.dx,
+                read.source_target.dy,
+            )));
+        }
+
+        let local_content = reconstruct_fetched_runtime_asset_content(asset, &read.content)?;
+        write_staged_runtime_file(&staging_dir, &asset.asset, &local_content)?;
+    }
+
+    set_runtime_provisioning_phase(progress.as_mut(), "validating fetched runtime");
+    let fetched_bundle = RuntimeBundle::load_from_dir(&staging_dir)?;
+    advance_runtime_provisioning_progress(progress.as_mut(), "validating fetched runtime", 0);
+
+    replace_staged_directory(&staging_dir, &installed_dir)?;
+    advance_runtime_provisioning_progress(progress.as_mut(), "saving local runtime", 0);
+
+    if let Some(progress) = progress.as_mut() {
+        progress.finish();
+    }
+
+    Ok(RuntimeFetchReport {
+        source_target: manifest_read.source_target,
+        fetched_assets: fetched_bundle
+            .assets()
+            .iter()
+            .map(|asset| asset.owned.clone())
+            .collect(),
+    })
+}
+
 fn install_runtime_bundle<R>(
     bundle: &RuntimeBundle,
+    module_manifest_text: Option<&str>,
     requested_target: ResolvedTarget,
     reader: &mut R,
     mut progress: Option<&mut RuntimeProvisioningProgressBar>,
@@ -1186,6 +1422,23 @@ where
         }
     }
 
+    if let Some(module_manifest_text) = module_manifest_text {
+        set_runtime_provisioning_phase(progress.as_deref_mut(), "saving runtime manifest");
+        let mut on_step = || {
+            advance_runtime_provisioning_progress(
+                progress.as_deref_mut(),
+                "saving runtime manifest",
+                0,
+            );
+        };
+        reader.write_module_file_path_with_progress(
+            requested_target,
+            MODULE_RUNTIME_MANIFEST_PATH,
+            module_manifest_text,
+            &mut on_step,
+        )?;
+    }
+
     set_runtime_provisioning_phase(progress.as_deref_mut(), "activating runtime");
     finalize_runtime_write_activation(
         provisioning_backend,
@@ -1222,7 +1475,8 @@ fn restore_runtime_bundle<R>(
 where
     R: RuntimeSlotReader + RuntimeSlotWriter + RuntimePageStorer + RuntimeModuleFileAccessor,
 {
-    let report = install_runtime_bundle(bundle, requested_target, reader, None)?;
+    let report = install_runtime_bundle(bundle, None, requested_target, reader, None)?;
+    reader.clear_module_file_path(requested_target, MODULE_RUNTIME_MANIFEST_PATH)?;
 
     Ok(RuntimeRemoveReport {
         removed_assets: report.installed_assets().to_vec(),
@@ -1267,6 +1521,7 @@ where
         &stored_pages,
         reader,
     )?;
+    reader.clear_module_file_path(requested_target, MODULE_RUNTIME_MANIFEST_PATH)?;
 
     let removed_assets = bundle
         .assets()
@@ -1285,6 +1540,110 @@ where
         restored_from_backup: false,
         warning: Some(warning.to_string()),
     })
+}
+
+fn runtime_owned_assets_from_manifest(manifest: &RuntimeBundleManifest) -> Vec<RuntimeOwnedAsset> {
+    let mut assets = Vec::with_capacity(manifest.owned_slots.len() + manifest.owned_files.len());
+
+    for slot in manifest.owned_slots.iter().cloned() {
+        assets.push(RuntimeOwnedAsset {
+            name: slot.name.clone(),
+            asset: slot.asset.clone(),
+            install_order: slot.install_order,
+            location: RuntimeOwnedAssetLocation::Slot(slot),
+        });
+    }
+
+    for file in manifest.owned_files.iter().cloned() {
+        assets.push(RuntimeOwnedAsset {
+            name: file.name.clone(),
+            asset: file.asset.clone(),
+            install_order: file.install_order,
+            location: RuntimeOwnedAssetLocation::File(file),
+        });
+    }
+
+    assets.sort_by_key(|asset| asset.install_order);
+    assets
+}
+
+fn reconstruct_fetched_runtime_asset_content(
+    asset: &RuntimeOwnedAsset,
+    fetched_content: &str,
+) -> Result<String> {
+    match &asset.location {
+        RuntimeOwnedAssetLocation::Slot(_) => {
+            reconstruct_fetched_slot_asset_content(fetched_content)
+        }
+        RuntimeOwnedAssetLocation::File(_) => {
+            Ok(fetched_content.replace("\r\n", "\n").replace('\r', "\n"))
+        }
+    }
+}
+
+fn reconstruct_fetched_slot_asset_content(fetched_content: &str) -> Result<String> {
+    let normalized = fetched_content.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let inner = trimmed
+        .strip_prefix("<?lua")
+        .and_then(|inner| inner.strip_suffix("?>"))
+        .map(str::trim)
+        .ok_or_else(|| {
+            RuntimeError::verification_failed(
+                "fetched runtime slot asset was not stored as a wrapped <?lua ... ?> module file",
+            )
+        })?;
+
+    let body = inner
+        .strip_prefix(protocol::GRID_LUA_CALLBACK_PREFIX)
+        .map(str::trim_start)
+        .ok_or_else(|| {
+            RuntimeError::verification_failed(
+                "fetched runtime slot asset was missing the expected Grid callback prefix",
+            )
+        })?;
+
+    Ok(normalize_text_content(body))
+}
+
+fn write_staged_runtime_file(staging_dir: &Path, relative_path: &str, content: &str) -> Result<()> {
+    let destination = staging_dir.join(relative_runtime_asset_path(relative_path)?);
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            RuntimeError::host_storage(format!(
+                "failed to create runtime fetch directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    fs::write(&destination, content).map_err(|error| {
+        RuntimeError::host_storage(format!(
+            "failed to write fetched runtime file {}: {error}",
+            destination.display()
+        ))
+    })
+}
+
+fn relative_runtime_asset_path(relative_path: &str) -> Result<&Path> {
+    let path = Path::new(relative_path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(RuntimeError::verification_failed(format!(
+            "fetched runtime asset path {} must stay within the local runtime directory",
+            relative_path
+        )));
+    }
+
+    Ok(path)
 }
 
 fn write_pre_install_bundle<R>(
@@ -1823,6 +2182,11 @@ fn read_transport_until_matching_evaluate_report(
         }
 
         if started_at.elapsed() >= total_window {
+            debug_log_evaluate_inbound(
+                "evaluate read-back timed out before a matching report was found",
+                requested_target,
+                &inbound,
+            );
             return extract_single_evaluate_report(&inbound, requested_target);
         }
 
@@ -1863,6 +2227,7 @@ fn read_transport_until_page_ack(
         }
 
         if started_at.elapsed() >= total_window {
+            debug_log_page_ack_inbound(pending_message, requested_target, &inbound);
             return extract_ack(&inbound, requested_target);
         }
 
@@ -2019,6 +2384,7 @@ fn extract_page_store_ack(inbound: &[u8], requested_target: ResolvedTarget) -> R
 fn extract_page_discard_ack(inbound: &[u8], requested_target: ResolvedTarget) -> Result<()> {
     let mut acknowledgements = Vec::new();
     let mut rejections = Vec::new();
+    let mut page_reports = Vec::new();
 
     for frame in split_complete_frames(inbound) {
         if !verify_grid_frame_checksum(frame) {
@@ -2034,15 +2400,22 @@ fn extract_page_discard_ack(inbound: &[u8], requested_target: ResolvedTarget) ->
         let source_target = GridTarget::new(source_x, source_y);
 
         for block in split_class_blocks(frame) {
-            if parse_ascii_hex_range(block, 1, 3) != Some(GRID_CLASS_PAGEDISCARD) {
-                continue;
-            }
-
-            match parse_ascii_hex_range(block, 4, 1) {
-                Some(GRID_INSTR_ACKNOWLEDGE) => {
-                    push_unique_target(&mut acknowledgements, source_target)
+            match parse_ascii_hex_range(block, 1, 3) {
+                Some(GRID_CLASS_PAGEDISCARD) => match parse_ascii_hex_range(block, 4, 1) {
+                    Some(GRID_INSTR_ACKNOWLEDGE) => {
+                        push_unique_target(&mut acknowledgements, source_target)
+                    }
+                    Some(GRID_INSTR_NACKNOWLEDGE) => {
+                        push_unique_target(&mut rejections, source_target)
+                    }
+                    _ => {}
+                },
+                Some(class)
+                    if class == GRID_CLASS_PAGEACTIVE
+                        && parse_ascii_hex_range(block, 4, 1) == Some(GRID_INSTR_REPORT) =>
+                {
+                    push_unique_target(&mut page_reports, source_target);
                 }
-                Some(GRID_INSTR_NACKNOWLEDGE) => push_unique_target(&mut rejections, source_target),
                 _ => {}
             }
         }
@@ -2056,9 +2429,33 @@ fn extract_page_discard_ack(inbound: &[u8], requested_target: ResolvedTarget) ->
     }
 
     match acknowledgements.as_slice() {
-        [] => Err(RuntimeError::unexpected_response(
-            "no PAGEDISCARD acknowledge was observed in read-back",
-        )),
+        [] => match page_reports.as_slice() {
+            [actual_target] => match requested_target {
+                ResolvedTarget::Explicit(expected) if *actual_target != expected => {
+                    Err(RuntimeError::verification_failed(format!(
+                        "page discard page report came from dx={} dy={} instead of the requested target",
+                        actual_target.dx, actual_target.dy
+                    )))
+                }
+                _ => {
+                    debug::log(
+                        "runtime-page",
+                        format!(
+                            "accepting PAGEACTIVE report from dx={} dy={} as PAGEDISCARD success",
+                            actual_target.dx, actual_target.dy
+                        ),
+                    );
+                    Ok(())
+                }
+            },
+            [] => Err(RuntimeError::unexpected_response(
+                "no PAGEDISCARD acknowledge was observed in read-back",
+            )),
+            targets => Err(RuntimeError::unexpected_response(format!(
+                "multiple PAGEACTIVE reports were returned while waiting for PAGEDISCARD ({})",
+                format_targets(targets)
+            ))),
+        },
         [actual_target] => match requested_target {
             ResolvedTarget::Explicit(expected) if *actual_target != expected => {
                 Err(RuntimeError::verification_failed(format!(
@@ -2125,6 +2522,11 @@ fn extract_single_evaluate_report(
                 )));
             }
 
+            debug_log_evaluate_inbound(
+                "no matching EVALUATE report was decoded",
+                requested_target,
+                inbound,
+            );
             Err(RuntimeError::unexpected_response(
                 "no EVALUATE report was observed in read-back",
             ))
@@ -2136,9 +2538,16 @@ fn extract_single_evaluate_report(
             }
 
             match unique_targets.as_slice() {
-                [] => Err(RuntimeError::unexpected_response(
-                    "no EVALUATE report was observed in read-back",
-                )),
+                [] => {
+                    debug_log_evaluate_inbound(
+                        "no broadcast EVALUATE report was decoded",
+                        requested_target,
+                        inbound,
+                    );
+                    Err(RuntimeError::unexpected_response(
+                        "no EVALUATE report was observed in read-back",
+                    ))
+                }
                 [_] => Ok(reports
                     .last()
                     .expect("broadcast evaluate reports should contain one report")
@@ -2149,6 +2558,133 @@ fn extract_single_evaluate_report(
                 ))),
             }
         }
+    }
+}
+
+fn debug_log_page_ack_inbound(context: &str, requested_target: ResolvedTarget, inbound: &[u8]) {
+    if !debug::is_debug_enabled() {
+        return;
+    }
+
+    let frames = split_complete_frames(inbound);
+    debug::log(
+        "runtime-page",
+        format!(
+            "{} for {}: inbound_bytes={} complete_frames={} hex={} ascii={}",
+            context,
+            requested_target,
+            inbound.len(),
+            frames.len(),
+            truncate_debug_text(&hex_bytes(inbound), 240),
+            truncate_debug_text(&ascii_bytes(inbound), 240)
+        ),
+    );
+
+    for (frame_index, frame) in frames.iter().enumerate() {
+        for (block_index, block) in split_class_blocks(frame).iter().enumerate() {
+            let class = parse_ascii_hex_range(block, 1, 3);
+            let instruction = parse_ascii_hex_range(block, 4, 1);
+            if class.is_some_and(|class| {
+                class == GRID_CLASS_PAGEDISCARD
+                    || class == GRID_CLASS_PAGESTORE
+                    || class == GRID_CLASS_PAGEACTIVE
+            }) {
+                debug::log(
+                    "runtime-page",
+                    format!(
+                        "frame {} block {} class={:?} instr={:?} block_hex={} block_ascii={}",
+                        frame_index,
+                        block_index,
+                        class,
+                        instruction,
+                        truncate_debug_text(&hex_bytes(block), 160),
+                        truncate_debug_text(&ascii_bytes(block), 160)
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn debug_log_evaluate_inbound(context: &str, requested_target: ResolvedTarget, inbound: &[u8]) {
+    if !debug::is_debug_enabled() {
+        return;
+    }
+
+    let frames = split_complete_frames(inbound);
+    debug::log(
+        "runtime-evaluate",
+        format!(
+            "{} for {}: inbound_bytes={} complete_frames={} hex={} ascii={}",
+            context,
+            requested_target,
+            inbound.len(),
+            frames.len(),
+            truncate_debug_text(&hex_bytes(inbound), 240),
+            truncate_debug_text(&ascii_bytes(inbound), 240)
+        ),
+    );
+
+    for (frame_index, frame) in frames.iter().enumerate() {
+        for (block_index, block) in split_class_blocks(frame).iter().enumerate() {
+            let class = parse_ascii_hex_range(block, 1, 3);
+            if class != Some(0x086) {
+                continue;
+            }
+
+            match protocol::parse_evaluate_response(block) {
+                Ok(values) => debug::log(
+                    "runtime-evaluate",
+                    format!(
+                        "decoded frame {} block {} as EVALUATE values {:?}",
+                        frame_index, block_index, values
+                    ),
+                ),
+                Err(error) => debug::log(
+                    "runtime-evaluate",
+                    format!(
+                        "failed to decode frame {} block {} as EVALUATE: {}; block_hex={}; block_ascii={}",
+                        frame_index,
+                        block_index,
+                        error,
+                        truncate_debug_text(&hex_bytes(block), 160),
+                        truncate_debug_text(&ascii_bytes(block), 160)
+                    ),
+                ),
+            }
+        }
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn ascii_bytes(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len());
+
+    for byte in bytes {
+        match byte {
+            0x20..=0x7e => output.push(char::from(*byte)),
+            b'\n' => output.push_str("\\n"),
+            b'\r' => output.push_str("\\r"),
+            b'\t' => output.push_str("\\t"),
+            _ => output.push('.'),
+        }
+    }
+
+    output
+}
+
+fn truncate_debug_text(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        text.to_string()
+    } else {
+        format!("{}...", &text[..limit])
     }
 }
 
@@ -2456,6 +2992,18 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn extract_page_discard_ack_accepts_pageactive_report_fallback() {
+        let inbound = grid_frame(
+            GridTarget::new(0, 0),
+            PacketIdentity::new(1, 1),
+            b"\x02030d00\x03\x04",
+        );
+
+        extract_page_discard_ack(&inbound, ResolvedTarget::Explicit(GridTarget::new(0, 0)))
+            .unwrap();
+    }
+
     #[derive(Default)]
     struct StaticSlotReader {
         slots: BTreeMap<String, RuntimeSlotRead>,
@@ -2533,12 +3081,49 @@ mod tests {
     }
 
     impl RuntimeModuleFileAccessor for StaticSlotReader {
+        fn read_module_file_path(
+            &mut self,
+            _target: ResolvedTarget,
+            _path: &str,
+        ) -> Result<Option<RuntimeSlotRead>> {
+            Err(RuntimeError::unexpected_response(
+                "static test reader does not support raw module-file reads",
+            ))
+        }
+
+        fn write_module_file_path(
+            &mut self,
+            _target: ResolvedTarget,
+            _path: &str,
+            _content: &str,
+        ) -> Result<()> {
+            Err(RuntimeError::unexpected_response(
+                "static test reader does not support raw module-file writes",
+            ))
+        }
+
+        fn clear_module_file_path(&mut self, _target: ResolvedTarget, _path: &str) -> Result<()> {
+            Err(RuntimeError::unexpected_response(
+                "static test reader does not support raw module-file clears",
+            ))
+        }
+
         fn read_owned_module_file(
             &mut self,
             _target: ResolvedTarget,
             asset: &RuntimeOwnedAsset,
         ) -> Result<Option<RuntimeSlotRead>> {
             Ok(self.slots.get(&asset.name).cloned())
+        }
+
+        fn read_owned_module_file_with_progress(
+            &mut self,
+            target: ResolvedTarget,
+            asset: &RuntimeOwnedAsset,
+            on_step: &mut dyn FnMut(),
+        ) -> Result<Option<RuntimeSlotRead>> {
+            on_step();
+            self.read_owned_module_file(target, asset)
         }
 
         fn write_owned_module_file(
@@ -2566,10 +3151,13 @@ mod tests {
     struct RecordingSlotAccessor {
         writes: Vec<String>,
         clears: Vec<String>,
+        module_path_writes: Vec<String>,
+        module_path_clears: Vec<String>,
         stored_pages: Vec<u8>,
         discarded_pages: usize,
         slots: BTreeMap<String, RuntimeSlotRead>,
         module_files: BTreeMap<String, RuntimeSlotRead>,
+        module_paths: BTreeMap<String, RuntimeSlotRead>,
         persist_writes: bool,
         drifted_slot: Option<String>,
         reject_page_store: bool,
@@ -2586,6 +3174,14 @@ mod tests {
 
         fn clear_order(&self) -> &[String] {
             &self.clears
+        }
+
+        fn module_path_writes(&self) -> &[String] {
+            &self.module_path_writes
+        }
+
+        fn module_path_clears(&self) -> &[String] {
+            &self.module_path_clears
         }
 
         fn discarded_pages(&self) -> usize {
@@ -2625,7 +3221,17 @@ mod tests {
                     asset.owned.name.clone(),
                     RuntimeSlotRead {
                         source_target,
-                        content,
+                        content: content.clone(),
+                    },
+                );
+                self.module_paths.insert(
+                    asset.owned.module_file_path().unwrap(),
+                    RuntimeSlotRead {
+                        source_target,
+                        content: expected_runtime_readback(
+                            RuntimeProvisioningBackend::ModuleFiles,
+                            &content,
+                        ),
                     },
                 );
             }
@@ -2667,17 +3273,67 @@ mod tests {
                     content: expected_config_slot_readback(""),
                 },
             );
+            self.module_paths.remove(&slot.derived_module_file_path());
             Ok(())
         }
     }
 
     impl RuntimeModuleFileAccessor for RecordingSlotAccessor {
+        fn read_module_file_path(
+            &mut self,
+            _target: ResolvedTarget,
+            path: &str,
+        ) -> Result<Option<RuntimeSlotRead>> {
+            Ok(self.module_paths.get(path).cloned())
+        }
+
+        fn write_module_file_path(
+            &mut self,
+            target: ResolvedTarget,
+            path: &str,
+            content: &str,
+        ) -> Result<()> {
+            self.module_path_writes.push(path.to_string());
+
+            if self.persist_writes {
+                let source_target = match target {
+                    ResolvedTarget::Broadcast => GridTarget::new(0, 0),
+                    ResolvedTarget::Explicit(target) => target,
+                };
+                self.module_paths.insert(
+                    path.to_string(),
+                    RuntimeSlotRead {
+                        source_target,
+                        content: content.to_string(),
+                    },
+                );
+            }
+
+            Ok(())
+        }
+
+        fn clear_module_file_path(&mut self, _target: ResolvedTarget, path: &str) -> Result<()> {
+            self.module_path_clears.push(path.to_string());
+            self.module_paths.remove(path);
+            Ok(())
+        }
+
         fn read_owned_module_file(
             &mut self,
             _target: ResolvedTarget,
             asset: &RuntimeOwnedAsset,
         ) -> Result<Option<RuntimeSlotRead>> {
             Ok(self.module_files.get(&asset.name).cloned())
+        }
+
+        fn read_owned_module_file_with_progress(
+            &mut self,
+            target: ResolvedTarget,
+            asset: &RuntimeOwnedAsset,
+            on_step: &mut dyn FnMut(),
+        ) -> Result<Option<RuntimeSlotRead>> {
+            on_step();
+            self.read_owned_module_file(target, asset)
         }
 
         fn write_owned_module_file(
@@ -2705,12 +3361,29 @@ mod tests {
                     asset.owned.name.clone(),
                     RuntimeSlotRead {
                         source_target,
+                        content: content.clone(),
+                    },
+                );
+                self.module_paths.insert(
+                    asset.owned.module_file_path().unwrap(),
+                    RuntimeSlotRead {
+                        source_target,
                         content,
                     },
                 );
             }
 
             Ok(())
+        }
+
+        fn write_owned_module_file_with_progress(
+            &mut self,
+            target: ResolvedTarget,
+            asset: &RuntimeAsset,
+            on_step: &mut dyn FnMut(),
+        ) -> Result<()> {
+            on_step();
+            self.write_owned_module_file(target, asset)
         }
 
         fn clear_owned_module_file(
@@ -2720,6 +3393,11 @@ mod tests {
         ) -> Result<()> {
             self.clears.push(asset.name.clone());
             self.module_files.remove(&asset.name);
+            self.module_paths.remove(
+                &asset
+                    .module_file_path()
+                    .expect("module-file path should exist"),
+            );
             Ok(())
         }
     }
@@ -3563,6 +4241,138 @@ install_order = 10
     }
 
     #[test]
+    fn install_persists_runtime_manifest_to_the_module_filesystem() {
+        let fixture = tempdir().unwrap();
+        let bundle_root = fixture.path().join("runtime");
+        write_runtime_bundle_dir(&bundle_root, "return 'draw'\n");
+        let bundle = RuntimeBundle::load_from_dir(&bundle_root).unwrap();
+        let expected_manifest = fs::read_to_string(bundle_root.join("manifest.toml")).unwrap();
+        let storage = tempdir().unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        install_runtime_bundle_with_storage(
+            &bundle,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+            storage.path(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            accessor.module_path_writes(),
+            &[MODULE_RUNTIME_MANIFEST_PATH.to_string()]
+        );
+        assert_eq!(
+            accessor.module_paths[MODULE_RUNTIME_MANIFEST_PATH].content,
+            expected_manifest
+        );
+    }
+
+    #[test]
+    fn fetch_rebuilds_the_local_runtime_from_module_slot_files() {
+        let source_fixture = tempdir().unwrap();
+        let bundle_root = source_fixture.path().join("runtime");
+        write_runtime_bundle_dir(&bundle_root, "return 'draw'\n");
+        let source_bundle = RuntimeBundle::load_from_dir(&bundle_root).unwrap();
+        let source_storage = tempdir().unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        install_runtime_bundle_with_storage(
+            &source_bundle,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+            source_storage.path(),
+            false,
+        )
+        .unwrap();
+
+        let target_storage = tempdir().unwrap();
+        let report = fetch_runtime_from_module_with_storage(
+            target_storage.path(),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+        let fetched_bundle =
+            RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(target_storage.path()))
+                .unwrap();
+
+        assert_eq!(report.source_target(), GridTarget::new(0, 0));
+        assert_eq!(report.fetched_assets().len(), source_bundle.assets().len());
+        assert_eq!(fetched_bundle.assets().len(), source_bundle.assets().len());
+        assert_eq!(
+            fetched_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.stored_content.clone())
+                .collect::<Vec<_>>(),
+            source_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.stored_content.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fetch_rebuilds_the_local_runtime_with_owned_files_from_module_storage() {
+        let source_bundle = RuntimeBundle::load_from_dir(
+            crate::runtime_bundle::bundled_runtime_root_dir().join("media"),
+        )
+        .unwrap();
+        let source_storage = tempdir().unwrap();
+        let mut accessor = RecordingSlotAccessor {
+            persist_writes: true,
+            ..Default::default()
+        };
+
+        install_runtime_bundle_with_storage(
+            &source_bundle,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+            source_storage.path(),
+            false,
+        )
+        .unwrap();
+
+        let target_storage = tempdir().unwrap();
+        fetch_runtime_from_module_with_storage(
+            target_storage.path(),
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            &mut accessor,
+        )
+        .unwrap();
+        let fetched_bundle =
+            RuntimeBundle::load_from_dir(installed_runtime_dir_from_root(target_storage.path()))
+                .unwrap();
+
+        assert_eq!(fetched_bundle.assets().len(), source_bundle.assets().len());
+        assert!(fetched_bundle
+            .assets()
+            .iter()
+            .any(|asset| matches!(asset.owned.location, RuntimeOwnedAssetLocation::File(_))));
+        assert_eq!(
+            fetched_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.stored_content.clone())
+                .collect::<Vec<_>>(),
+            source_bundle
+                .assets()
+                .iter()
+                .map(|asset| asset.stored_content.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn remove_restores_pre_install_backup_when_available() {
         let fixture = tempdir().unwrap();
         let bundle = RuntimeBundle::bundled().unwrap();
@@ -3609,6 +4419,10 @@ install_order = 10
         assert_eq!(report.removed_assets().len(), bundle.assets().len());
         assert!(report.restored_from_backup());
         assert_eq!(report.warning(), None);
+        assert_eq!(
+            accessor.module_path_clears(),
+            &[MODULE_RUNTIME_MANIFEST_PATH.to_string()]
+        );
         assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
         assert!(accessor
             .slots
@@ -3657,6 +4471,10 @@ install_order = 10
                 .collect::<Vec<_>>()
         );
         assert_eq!(accessor.stored_pages(), &[0]);
+        assert_eq!(
+            accessor.module_path_clears(),
+            &[MODULE_RUNTIME_MANIFEST_PATH.to_string()]
+        );
         assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
         assert!(accessor
             .slots
@@ -3719,6 +4537,10 @@ install_order = 10
         assert_eq!(report.removed_assets().len(), bundle.assets().len());
         assert!(report.restored_from_backup());
         assert_eq!(report.warning(), None);
+        assert_eq!(
+            accessor.module_path_clears(),
+            &[MODULE_RUNTIME_MANIFEST_PATH.to_string()]
+        );
         assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
         assert_eq!(
             accessor.module_files["lcd-draw"].content,
@@ -3775,6 +4597,10 @@ install_order = 10
         );
         assert!(accessor.write_order().is_empty());
         assert!(accessor.stored_pages().is_empty());
+        assert_eq!(
+            accessor.module_path_clears(),
+            &[MODULE_RUNTIME_MANIFEST_PATH.to_string()]
+        );
         assert!(!installed_runtime_dir_from_root(fixture.path()).exists());
         assert!(accessor.module_files.is_empty());
     }

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::debug;
 use crate::protocol::LuaValue;
 use crate::runtime::{
     Result, RuntimeError, RuntimeEvaluateReport, RuntimeSlotRead, TransportRuntimeSlotReader,
@@ -18,6 +19,10 @@ const READ_CHUNK_SIZE: usize = 50;
 // Keep writes at the same conservative chunk size for parity with the working
 // Grid Editor file-manager path.
 const WRITE_CHUNK_SIZE: usize = 50;
+
+// File-manager reads are idempotent, so a small retry budget is safe when the
+// firmware drops an EVALUATE reply for a chunk read.
+const READ_EVALUATE_ATTEMPTS: usize = 3;
 
 pub(crate) trait ModuleFileEvaluator {
     fn evaluate_lua(&mut self, target: ResolvedTarget, lua: &str) -> Result<RuntimeEvaluateReport>;
@@ -58,7 +63,8 @@ pub(crate) fn read_owned_slot_module_file<E>(
 where
     E: ModuleFileEvaluator,
 {
-    read_owned_slot_module_file_with_progress(evaluator, target, owned, &mut || {})
+    let path = derive_owned_module_file_path(owned)?;
+    read_module_file(evaluator, target, &path)
 }
 
 pub(crate) fn read_owned_slot_module_file_with_progress<E>(
@@ -71,12 +77,35 @@ where
     E: ModuleFileEvaluator,
 {
     let path = derive_owned_module_file_path(owned)?;
+    read_module_file_with_progress(evaluator, target, &path, on_step)
+}
+
+pub(crate) fn read_module_file<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    path: &str,
+) -> Result<Option<RuntimeSlotRead>>
+where
+    E: ModuleFileEvaluator,
+{
+    read_module_file_with_progress(evaluator, target, path, &mut || {})
+}
+
+pub(crate) fn read_module_file_with_progress<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    path: &str,
+    on_step: &mut dyn FnMut(),
+) -> Result<Option<RuntimeSlotRead>>
+where
+    E: ModuleFileEvaluator,
+{
     let mut content = String::new();
     let mut offset = 0usize;
     let mut source_target = None;
 
     loop {
-        let report = evaluator.evaluate_lua(target, &build_read_chunk_lua(&path, offset))?;
+        let report = evaluate_module_file_read_chunk(evaluator, target, &path, offset)?;
         match source_target {
             Some(expected_target) if report.source_target != expected_target => {
                 return Err(RuntimeError::unexpected_response(format!(
@@ -115,6 +144,46 @@ where
     }
 }
 
+fn evaluate_module_file_read_chunk<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    path: &str,
+    offset: usize,
+) -> Result<RuntimeEvaluateReport>
+where
+    E: ModuleFileEvaluator,
+{
+    let lua = build_read_chunk_lua(path, offset);
+
+    for attempt in 1..=READ_EVALUATE_ATTEMPTS {
+        match evaluator.evaluate_lua(target, &lua) {
+            Ok(report) => return Ok(report),
+            Err(error)
+                if is_missing_evaluate_report(&error) && attempt < READ_EVALUATE_ATTEMPTS =>
+            {
+                debug::log(
+                    "module-files",
+                    format!(
+                        "retrying read for {} at offset {} after missing EVALUATE report (attempt {}/{})",
+                        path, offset, attempt + 1, READ_EVALUATE_ATTEMPTS
+                    ),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("module file read retry loop should return or error")
+}
+
+fn is_missing_evaluate_report(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::UnexpectedResponse { message }
+            if message == "no EVALUATE report was observed in read-back"
+    )
+}
+
 pub(crate) fn module_file_read_step_estimate(content: &str) -> usize {
     chunk_bytes(content.as_bytes(), READ_CHUNK_SIZE)
         .len()
@@ -130,7 +199,8 @@ pub(crate) fn write_owned_slot_module_file_atomic<E>(
 where
     E: ModuleFileEvaluator,
 {
-    write_owned_slot_module_file_atomic_with_progress(evaluator, target, owned, content, &mut || {})
+    let path = derive_owned_module_file_path(owned)?;
+    write_module_file_atomic(evaluator, target, &path, content)
 }
 
 pub(crate) fn write_owned_slot_module_file_atomic_with_progress<E>(
@@ -144,6 +214,31 @@ where
     E: ModuleFileEvaluator,
 {
     let path = derive_owned_module_file_path(owned)?;
+    write_module_file_atomic_with_progress(evaluator, target, &path, content, on_step)
+}
+
+pub(crate) fn write_module_file_atomic<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    path: &str,
+    content: &str,
+) -> Result<()>
+where
+    E: ModuleFileEvaluator,
+{
+    write_module_file_atomic_with_progress(evaluator, target, path, content, &mut || {})
+}
+
+pub(crate) fn write_module_file_atomic_with_progress<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    path: &str,
+    content: &str,
+    on_step: &mut dyn FnMut(),
+) -> Result<()>
+where
+    E: ModuleFileEvaluator,
+{
     let tmp_path = format!("{path}.tmp");
 
     for (index, chunk) in chunk_bytes(content.as_bytes(), WRITE_CHUNK_SIZE)
@@ -183,7 +278,18 @@ where
     E: ModuleFileEvaluator,
 {
     let path = derive_owned_module_file_path(owned)?;
-    let report = evaluator.evaluate_lua(target, &build_clear_file_lua(&path))?;
+    clear_module_file(evaluator, target, &path)
+}
+
+pub(crate) fn clear_module_file<E>(
+    evaluator: &mut E,
+    target: ResolvedTarget,
+    path: &str,
+) -> Result<()>
+where
+    E: ModuleFileEvaluator,
+{
+    let report = evaluator.evaluate_lua(target, &build_clear_file_lua(path))?;
     decode_boolean_response(&format!("module file clear for {}", path), &report.values)?;
     Ok(())
 }
@@ -225,22 +331,40 @@ fn decode_read_chunk_response(path: &str, values: &[LuaValue]) -> Result<(bool, 
     match values {
         [LuaValue::Boolean(false), LuaValue::Nil] => Ok((false, String::new())),
         [LuaValue::Boolean(true), LuaValue::String(chunk)] => Ok((true, chunk.clone())),
-        _ => Err(RuntimeError::unexpected_response(format!(
-            "module file read for {} returned an unexpected EVALUATE value shape",
-            path
-        ))),
+        _ => {
+            debug::log(
+                "module-files",
+                format!("unexpected read response for {}: values={:?}", path, values),
+            );
+            Err(RuntimeError::unexpected_response(format!(
+                "module file read for {} returned an unexpected EVALUATE value shape: {:?}",
+                path, values
+            )))
+        }
     }
 }
 
 fn decode_boolean_response(operation: &str, values: &[LuaValue]) -> Result<()> {
     match values {
         [LuaValue::Boolean(true)] => Ok(()),
+        [LuaValue::Boolean(true), LuaValue::String(extra)] if extra.is_empty() => Ok(()),
+        [LuaValue::Boolean(true), LuaValue::Nil] => Ok(()),
         [LuaValue::Boolean(false)] => Err(RuntimeError::unexpected_response(format!(
             "{operation} returned false"
         ))),
-        _ => Err(RuntimeError::unexpected_response(format!(
-            "{operation} returned an unexpected EVALUATE value shape"
-        ))),
+        _ => {
+            debug::log(
+                "module-files",
+                format!(
+                    "unexpected boolean response for {}: values={:?}",
+                    operation, values
+                ),
+            );
+            Err(RuntimeError::unexpected_response(format!(
+                "{operation} returned an unexpected EVALUATE value shape: {:?}",
+                values
+            )))
+        }
     }
 }
 
@@ -398,6 +522,33 @@ mod tests {
     }
 
     #[test]
+    fn reads_arbitrary_module_file_paths_back_in_multiple_chunks() {
+        let mut evaluator = RecordingEvaluator::default();
+        evaluator.push_response(vec![
+            LuaValue::Boolean(true),
+            LuaValue::String("a".repeat(READ_CHUNK_SIZE)),
+        ]);
+        evaluator.push_response(vec![
+            LuaValue::Boolean(true),
+            LuaValue::String("tail".to_string()),
+        ]);
+
+        let content = read_module_file(
+            &mut evaluator,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            "/vsn1-cli-runtime-manifest.toml",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            content.content,
+            format!("{}tail", "a".repeat(READ_CHUNK_SIZE))
+        );
+        assert!(evaluator.scripts[0].contains("io.open(\"/vsn1-cli-runtime-manifest.toml\",\"r\")"));
+    }
+
+    #[test]
     fn returns_none_when_module_file_is_missing() {
         let mut evaluator = RecordingEvaluator::default();
         evaluator.push_response(vec![LuaValue::Boolean(false), LuaValue::Nil]);
@@ -438,6 +589,32 @@ mod tests {
             format!("{}tail", "a".repeat(READ_CHUNK_SIZE))
         );
         assert_eq!(steps, 2);
+    }
+
+    #[test]
+    fn retries_module_file_reads_after_missing_evaluate_reports() {
+        let mut evaluator = RecordingEvaluator::default();
+        evaluator.push_response(vec![
+            LuaValue::Boolean(true),
+            LuaValue::String("tail".to_string()),
+        ]);
+
+        let mut attempts = 0usize;
+        let content = read_module_file_with_progress(
+            &mut FailingReadEvaluator {
+                failures_before_success: 2,
+                inner: &mut evaluator,
+                attempts: &mut attempts,
+            },
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            "/helper.lua",
+            &mut || {},
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(attempts, 3);
+        assert_eq!(content.content, "tail");
     }
 
     #[test]
@@ -484,6 +661,29 @@ mod tests {
     }
 
     #[test]
+    fn writes_arbitrary_module_file_paths_in_chunked_temp_file_appends_then_renames() {
+        let mut evaluator = RecordingEvaluator::default();
+        evaluator.push_response(vec![LuaValue::Boolean(true)]);
+        evaluator.push_response(vec![LuaValue::Boolean(true)]);
+
+        write_module_file_atomic(
+            &mut evaluator,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            "/vsn1-cli-runtime-manifest.toml",
+            "name = 'test'",
+        )
+        .unwrap();
+
+        assert_eq!(evaluator.scripts.len(), 2);
+        assert!(
+            evaluator.scripts[0].contains("io.open(\"/vsn1-cli-runtime-manifest.toml.tmp\",\"w\")")
+        );
+        assert!(evaluator.scripts[1].contains(
+            "os.rename(\"/vsn1-cli-runtime-manifest.toml.tmp\",\"/vsn1-cli-runtime-manifest.toml\")"
+        ));
+    }
+
+    #[test]
     fn writes_empty_module_files_by_creating_an_empty_temp_file() {
         let mut evaluator = RecordingEvaluator::default();
         evaluator.push_response(vec![LuaValue::Boolean(true)]);
@@ -524,6 +724,15 @@ mod tests {
     }
 
     #[test]
+    fn accepts_boolean_success_with_trailing_empty_string() {
+        decode_boolean_response(
+            "module file chunk write for /helper.lua.tmp",
+            &[LuaValue::Boolean(true), LuaValue::String(String::new())],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn clears_module_files_and_their_stale_temp_files() {
         let mut evaluator = RecordingEvaluator::default();
         evaluator.push_response(vec![LuaValue::Boolean(true)]);
@@ -541,9 +750,51 @@ mod tests {
     }
 
     #[test]
+    fn clears_arbitrary_module_files_and_their_stale_temp_files() {
+        let mut evaluator = RecordingEvaluator::default();
+        evaluator.push_response(vec![LuaValue::Boolean(true)]);
+
+        clear_module_file(
+            &mut evaluator,
+            ResolvedTarget::Explicit(GridTarget::new(0, 0)),
+            "/vsn1-cli-runtime-manifest.toml",
+        )
+        .unwrap();
+
+        assert_eq!(evaluator.scripts.len(), 1);
+        assert!(evaluator.scripts[0].contains("os.remove(\"/vsn1-cli-runtime-manifest.toml\")"));
+        assert!(evaluator.scripts[0].contains("os.remove(\"/vsn1-cli-runtime-manifest.toml.tmp\")"));
+    }
+
+    #[test]
     fn escapes_non_printable_write_bytes_for_lua() {
         let escaped = lua_string_literal(&[0, b'"', b'\\', b'\n', 0x7f]);
 
         assert_eq!(escaped, "\"\\x00\\\"\\\\\\n\\x7f\"");
+    }
+
+    struct FailingReadEvaluator<'a> {
+        failures_before_success: usize,
+        inner: &'a mut RecordingEvaluator,
+        attempts: &'a mut usize,
+    }
+
+    impl ModuleFileEvaluator for FailingReadEvaluator<'_> {
+        fn evaluate_lua(
+            &mut self,
+            target: ResolvedTarget,
+            lua: &str,
+        ) -> Result<RuntimeEvaluateReport> {
+            *self.attempts += 1;
+
+            if self.failures_before_success > 0 {
+                self.failures_before_success -= 1;
+                return Err(RuntimeError::unexpected_response(
+                    "no EVALUATE report was observed in read-back",
+                ));
+            }
+
+            self.inner.evaluate_lua(target, lua)
+        }
     }
 }
