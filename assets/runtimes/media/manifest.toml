@@ -7,11 +7,18 @@ activation = "persistent"
 notes = "Primary media metadata and progress layer."
 
 [[layers]]
+name = "player"
+priority = 5
+activation = "temporary"
+timeout_ms = 5000
+notes = "Temporary player-name overlay shown above the base layer."
+
+[[layers]]
 name = "playback_status"
 priority = 10
 activation = "temporary"
 timeout_ms = 2000
-notes = "Temporary playback state overlay shown above the base layer."
+notes = "Temporary playback icon overlay shown above lower layers."
 
 [[owned_files]]
 name = "media-runtime-module"
@@ -76,9 +83,17 @@ clear_value = 0.0
 notes = "Current playback position in whole seconds, formatted on-device as mm:ss."
 
 [[fields]]
+name = "player.name"
+layer = "player"
+value_kind = "text"
+runtime_key = "n"
+clear_value = ""
+notes = "Temporary player name overlay shown for 5 seconds."
+
+[[fields]]
 name = "playback_status.status"
 layer = "playback_status"
 value_kind = "text"
 runtime_key = "s"
 clear_value = ""
-notes = "Temporary playback status text such as Playing or Paused."
+notes = "Temporary playback status such as playing or paused, rendered as an icon overlay."

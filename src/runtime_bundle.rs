@@ -919,6 +919,7 @@ install_order = 10
                 .collect::<Vec<_>>(),
             vec![
                 ("base", RuntimeLayerActivation::Persistent, None),
+                ("player", RuntimeLayerActivation::Temporary, Some(5000)),
                 (
                     "playback_status",
                     RuntimeLayerActivation::Temporary,
@@ -931,6 +932,11 @@ install_order = 10
             .fields
             .iter()
             .any(|field| field.name == "base.duration"));
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "player.name"));
         assert!(bundle
             .manifest()
             .fields

@@ -10,13 +10,14 @@ use crate::runtime_bundle::{RuntimeOwnedAsset, RuntimeOwnedAssetLocation};
 use crate::targeting::ResolvedTarget;
 use crate::transport::SerialTransport;
 
-// Read requests carry only the path plus an offset/count, so they can use a
-// larger chunk size than Grid Editor's provisional 50-byte constant.
-const READ_CHUNK_SIZE: usize = 512;
+// Keep module-file reads aligned with Grid Editor's proven 50-byte chunking.
+// Larger chunks were attractive for throughput, but hardware validation showed
+// missed EVALUATE reports on larger runtime-module transfers.
+const READ_CHUNK_SIZE: usize = 50;
 
-// Write requests embed the escaped chunk payload into the EVALUATE Lua, so keep
-// them smaller than reads while still materially reducing round trips.
-const WRITE_CHUNK_SIZE: usize = 64;
+// Keep writes at the same conservative chunk size for parity with the working
+// Grid Editor file-manager path.
+const WRITE_CHUNK_SIZE: usize = 50;
 
 pub(crate) trait ModuleFileEvaluator {
     fn evaluate_lua(&mut self, target: ResolvedTarget, lua: &str) -> Result<RuntimeEvaluateReport>;
