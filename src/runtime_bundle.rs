@@ -934,6 +934,7 @@ install_order = 10
                     RuntimeLayerActivation::Temporary,
                     Some(2000)
                 ),
+                ("volume", RuntimeLayerActivation::Temporary, Some(1000)),
             ]
         );
         assert!(bundle
@@ -951,6 +952,16 @@ install_order = 10
             .fields
             .iter()
             .any(|field| field.name == "playback_status.status"));
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "volume.volume"));
+        assert!(bundle
+            .manifest()
+            .fields
+            .iter()
+            .any(|field| field.name == "volume.mute"));
 
         for asset in bundle.assets() {
             match asset.owned.name.as_str() {
@@ -993,6 +1004,9 @@ install_order = 10
         assert!(runtime
             .normalized_content
             .contains("function Module.draw(self)"));
+        assert!(runtime
+            .normalized_content
+            .contains("local function draw_volume_overlay(self, volume, mute)"));
     }
 
     #[test]

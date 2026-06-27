@@ -65,6 +65,67 @@ local function draw_playback_status_overlay(self, status)
     self:ldft(status, 96, 111, 18, c[2])
 end
 
+local function draw_volume_overlay(self, volume, mute)
+    local center_x = 160
+    local center_y = 120
+    local outer_radius = 44
+    local normalized = math.max(0, math.min(1, tonumber(volume) or 0))
+
+    self:ldrrf(
+        center_x - outer_radius,
+        center_y - outer_radius,
+        center_x + outer_radius,
+        center_y + outer_radius,
+        outer_radius,
+        c[1]
+    )
+    self:ldrr(
+        center_x - outer_radius,
+        center_y - outer_radius,
+        center_x + outer_radius,
+        center_y + outer_radius,
+        outer_radius,
+        c[2]
+    )
+
+    local fill_radius = math.floor(40 * normalized)
+    if fill_radius > 0 then
+        self:ldrrf(
+            center_x - fill_radius,
+            center_y - fill_radius,
+            center_x + fill_radius,
+            center_y + fill_radius,
+            fill_radius,
+            c[3]
+        )
+    end
+
+    if not mute then
+        return
+    end
+
+    self:ldpof(
+        { center_x - 30, center_x - 18, center_x - 18, center_x - 30 },
+        { center_y - 12, center_y - 12, center_y + 12, center_y + 12 },
+        c[2]
+    )
+    self:ldpof(
+        { center_x - 18, center_x - 2, center_x + 10, center_x + 10, center_x - 2 },
+        { center_y - 14, center_y - 14, center_y - 28, center_y + 28, center_y + 14 },
+        c[2]
+    )
+    self:ldpof(
+        { center_x + 10, center_x + 16, center_x + 34, center_x + 28 },
+        { center_y - 14, center_y - 20, center_y - 2, center_y + 4 },
+        c[2]
+    )
+    self:ldpof(
+        { center_x + 10, center_x + 16, center_x + 34, center_x + 28 },
+        { center_y + 14, center_y + 20, center_y + 2, center_y - 4 },
+        c[2]
+    )
+end
+
 function Module.init()
     glsb(255)
     vsn1_cli_state = {
@@ -72,12 +133,13 @@ function Module.init()
         w = "",
         b = "base",
         u = {},
-        o = { "player", "playback_status" },
-        m = { base = 0, player = 5, playback_status = 2 },
+        o = { "player", "playback_status", "volume" },
+        m = { base = 0, player = 5, playback_status = 2, volume = 1 },
         l = {
             base = { a = "", t = "", l = "", d = 0, p = 0 },
             player = { n = "" },
             playback_status = { s = "" },
+            volume = { v = 0, m = false },
         },
     }
     c = c or {
@@ -168,6 +230,8 @@ function Module.draw(self)
             draw_player_overlay(self, layers.player.n)
         elseif layer == "playback_status" then
             draw_playback_status_overlay(self, layers.playback_status.s)
+        elseif layer == "volume" then
+            draw_volume_overlay(self, layers.volume.v, layers.volume.m)
         end
     end
 

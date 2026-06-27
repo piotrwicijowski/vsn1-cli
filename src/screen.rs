@@ -674,6 +674,22 @@ mod tests {
             media.field("base.duration").unwrap().value_kind(),
             ScreenValueKind::Float
         );
+        assert_eq!(
+            media.field("volume.volume").unwrap().value_kind(),
+            ScreenValueKind::Float
+        );
+        assert_eq!(
+            media.field("volume.mute").unwrap().value_kind(),
+            ScreenValueKind::Bool
+        );
+        assert_eq!(
+            media.field("volume.volume").unwrap().clear_value(),
+            &ScreenValue::Float(0.0)
+        );
+        assert_eq!(
+            media.field("volume.mute").unwrap().clear_value(),
+            &ScreenValue::Bool(false)
+        );
 
         let info = registry.field("persistent.info").unwrap();
         assert_eq!(info.value_kind(), ScreenValueKind::TextList);
@@ -828,11 +844,18 @@ notes = "fixture"
         )
         .unwrap();
         let assignments = media
-            .parse_assignments(["base.duration=344.5", "base.position=91.25"])
+            .parse_assignments([
+                "base.duration=344.5",
+                "base.position=91.25",
+                "volume.volume=0.73",
+                "volume.mute=true",
+            ])
             .unwrap();
 
         assert_eq!(assignments[0].value(), &ScreenValue::Float(344.5));
         assert_eq!(assignments[1].value(), &ScreenValue::Float(91.25));
+        assert_eq!(assignments[2].value(), &ScreenValue::Float(0.73));
+        assert_eq!(assignments[3].value(), &ScreenValue::Bool(true));
     }
 
     #[test]
@@ -994,15 +1017,39 @@ notes = "fixture"
         )
         .unwrap();
         let assignments = media
-            .parse_assignments(["base.duration=344.5", "base.position=91.25"])
+            .parse_assignments([
+                "base.duration=344.5",
+                "base.position=91.25",
+                "volume.volume=0.73",
+                "volume.mute=true",
+            ])
             .unwrap();
 
         let lua = compile_set_lua(&assignments, None).unwrap();
 
         assert_eq!(
             lua,
-            "set_field('base','d',344.5);set_field('base','p',91.25)"
+            "set_field('base','d',344.5);set_field('base','p',91.25);set_field('volume','v',0.73);set_field('volume','m',true)"
         );
+    }
+
+    #[test]
+    fn clear_plan_uses_media_runtime_defaults_for_volume_layer() {
+        let media = ScreenFieldRegistry::from_bundle(
+            &RuntimeBundle::load_from_dir(
+                crate::runtime_bundle::bundled_runtime_root_dir().join("media"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let volume = media.clear_plan(&ScreenLayer::new("volume"));
+
+        assert_eq!(volume.len(), 2);
+        assert_eq!(volume[0].field().public_name(), "volume.volume");
+        assert_eq!(volume[0].value(), &ScreenValue::Float(0.0));
+        assert_eq!(volume[1].field().public_name(), "volume.mute");
+        assert_eq!(volume[1].value(), &ScreenValue::Bool(false));
     }
 
     #[test]

@@ -20,6 +20,13 @@ activation = "temporary"
 timeout_ms = 2000
 notes = "Temporary playback icon overlay shown above lower layers."
 
+[[layers]]
+name = "volume"
+priority = 20
+activation = "temporary"
+timeout_ms = 1000
+notes = "Temporary volume overlay shown above lower layers."
+
 [[owned_files]]
 name = "media-runtime-module"
 path = "/vsn1_media_runtime.lua"
@@ -97,3 +104,19 @@ value_kind = "text"
 runtime_key = "s"
 clear_value = ""
 notes = "Temporary playback status such as playing or paused, rendered as an icon overlay."
+
+[[fields]]
+name = "volume.volume"
+layer = "volume"
+value_kind = "float"
+runtime_key = "v"
+clear_value = 0.0
+notes = "Temporary normalized volume level from 0.0 through 1.0, rendered as a filled circle overlay."
+
+[[fields]]
+name = "volume.mute"
+layer = "volume"
+value_kind = "bool"
+runtime_key = "m"
+clear_value = false
+notes = "Temporary mute state that overlays a muted speaker icon over the volume circle."
